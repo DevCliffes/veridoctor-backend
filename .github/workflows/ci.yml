@@ -1,0 +1,30 @@
+name: Veridoctor CI/CD
+
+on:
+  push:
+    branches:
+      - main
+      - dev
+      - uat
+  workflow_dispatch:
+
+jobs:
+  build_deploy_api_development:
+    if: github.ref == 'refs/heads/dev'
+    runs-on: self-hosted
+    environment: development
+    steps:
+      - uses: actions/checkout@v3
+      - name: Build and deploy to develop
+        run: |
+          docker-build veridoctor-api dev ./Dockerfile /home/veridoctor/veridoctor/env/.api-dev.env.sh -y
+
+  build_deploy_api_prod:
+    if: github.ref == 'refs/heads/main'
+    runs-on: self-hosted
+    environment: development
+    steps:
+        - uses: actions/checkout@v3
+        - name: Build and deploy to prod
+          run: |
+            docker-build veridoctor-api prod ./Dockerfile -y
