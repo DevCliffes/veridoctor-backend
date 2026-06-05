@@ -86,7 +86,10 @@ class RegisterView(APIView):
                 purpose="VERIFICATION",
             )
             identity_otp.save()
-            identity.email_user("ACCOUNT VERIFICATION", message, FROM_EMAIL)
+            try:
+                identity.email_user("ACCOUNT VERIFICATION", message, FROM_EMAIL)
+            except Exception:
+                pass
             return Response(serializer.data, status=status.HTTP_201_CREATED)
         return Response(serializer.errors, status=status.HTTP_400_BAD_REQUEST)
 
