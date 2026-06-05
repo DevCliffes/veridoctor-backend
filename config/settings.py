@@ -114,7 +114,7 @@ JWT_SECRET = os.getenv("JWT_SECRET")
 # EMAIL SETTINGS
 # SMTP server config
 # EMAIL_BACKEND = "django.core.mail.backends.console.EmailBackend"  # For dev
-EMAIL_BACKEND = "django.core.mail.backends.console.EmailBackend"  # For prod
+EMAIL_BACKEND = "django.core.mail.backends.smtp.EmailBackend"  # For prod
 EMAIL_HOST = os.getenv("EMAIL_HOST")
 EMAIL_PORT = os.getenv("EMAIL_PORT")
 EMAIL_USE_TLS = True
