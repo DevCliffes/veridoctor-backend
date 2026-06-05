@@ -28,7 +28,7 @@ else:
     CORS_ALLOWED_ORIGINS = os.getenv("FRONTEND_URLS", "").split(",")
     CSRF_TRUSTED_ORIGINS = os.getenv("FRONTEND_URLS", "").split(",")
     CSRF_COOKIE_SAMESITE = "None"
-    CSRF_COOKIE_DOMAIN = ".veridoctor.com"
+    CSRF_COOKIE_DOMAIN = None
     SESSION_COOKIE_SAMESITE = "None"
 
 CORS_ALLOW_CREDENTIALS = True
