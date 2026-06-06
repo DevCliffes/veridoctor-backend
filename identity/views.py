@@ -75,7 +75,6 @@ class RegisterView(APIView):
                 {"error": "bad request"}, status=status.HTTP_400_BAD_REQUEST
             )
         otp = generate_code(length=6, uppercase_only=True)
-        otp = generate_code(length=6, uppercase_only=True)
         print(f"DEBUG OTP for {request.data.get('email')}: {otp}", flush=True)
         message = f"Your email address was used to create an account with veridoctor, use the code {otp} to verify your email address and complete account creation. This code will be valid for the next 10 minutes"  # TODO: use a template for messages
         serializer = IdentitySerializer(data=request.data)
