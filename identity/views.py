@@ -88,19 +88,20 @@ class RegisterView(APIView):
             identity_otp.save()
             import threading
             import requests
-def send_brevo_email():
-    requests.post(
-        "https://api.brevo.com/v3/smtp/email",
-        headers={"api-key": os.environ.get("BREVO_API_KEY"), "Content-Type": "application/json"},
-        json={
-            "sender": {"name": "Veridoctor", "email": FROM_EMAIL},
-            "to": [{"email": identity.email}],
-            "subject": "ACCOUNT VERIFICATION",
-            "textContent": message
-        }
-    )
-threading.Thread(target=send_brevo_email).start()
+            def send_brevo_email():
+                requests.post(
+                    "https://api.brevo.com/v3/smtp/email",
+                    headers={"api-key": os.environ.get("BREVO_API_KEY"), "Content-Type": "application/json"},
+                    json={
+                        "sender": {"name": "Veridoctor", "email": FROM_EMAIL},
+                        "to": [{"email": identity.email}],
+                        "subject": "ACCOUNT VERIFICATION",
+                        "textContent": message
+                    }
+                )
+            threading.Thread(target=send_brevo_email).start()
             return Response(serializer.data, status=status.HTTP_201_CREATED)
+        return Response(serializer.errors, status=status.HTTP_400_BAD_REQUEST)
         return Response(serializer.errors, status=status.HTTP_400_BAD_REQUEST)
 
     def patch(self, request, identity_id):
