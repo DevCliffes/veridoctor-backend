@@ -86,11 +86,9 @@ class RegisterView(APIView):
                 purpose="VERIFICATION",
             )
             identity_otp.save()
-            try:
-                identity.email_user("ACCOUNT VERIFICATION", message, FROM_EMAIL)
-            except Exception:
-                pass
-            return Response(serializer.data, status=status.HTTP_201_CREATED)
+            import threading
+threading.Thread(target=lambda: identity.email_user("ACCOUNT VERIFICATION", message, FROM_EMAIL)).start()
+return Response(serializer.data, status=status.HTTP_201_CREATED)
         return Response(serializer.errors, status=status.HTTP_400_BAD_REQUEST)
 
     def patch(self, request, identity_id):
