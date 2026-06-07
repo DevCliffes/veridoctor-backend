@@ -1,4 +1,3 @@
-from django.shortcuts import render
 from rest_framework.views import APIView
 from rest_framework.response import Response
 from rest_framework import status
@@ -8,24 +7,24 @@ from identity.models import Identity
 
 
 class ServiceView(APIView):
-    def get(self, request, provider_id):
-        """Get all services for a provider"""
+    def get(self, request, identity_id):
         try:
-            provider = HealthcareProvider.objects.get(id=provider_id)
+            identity = Identity.objects.get(id=identity_id)
+            provider = HealthcareProvider.objects.get(identity=identity)
             services = Service.objects.filter(provider=provider)
             serializer = ServiceSerializer(services, many=True)
             return Response(serializer.data, status=status.HTTP_200_OK)
-        except HealthcareProvider.DoesNotExist:
+        except (Identity.DoesNotExist, HealthcareProvider.DoesNotExist):
             return Response({"error": "Provider not found"}, status=status.HTTP_404_NOT_FOUND)
 
-    def post(self, request, provider_id):
-        """Add a new service for a provider"""
+    def post(self, request, identity_id):
         try:
-            provider = HealthcareProvider.objects.get(id=provider_id)
+            identity = Identity.objects.get(id=identity_id)
+            provider, _ = HealthcareProvider.objects.get_or_create(identity=identity)
             serializer = ServiceSerializer(data=request.data)
             if serializer.is_valid():
                 serializer.save(provider=provider)
                 return Response(serializer.data, status=status.HTTP_201_CREATED)
             return Response(serializer.errors, status=status.HTTP_400_BAD_REQUEST)
-        except HealthcareProvider.DoesNotExist:
-            return Response({"error": "Provider not found"}, status=status.HTTP_404_NOT_FOUND)
+        except Identity.DoesNotExist:
+            return Response({"error": "Identity not found"}, status=status.HTTP_404_NOT_FOUND)
