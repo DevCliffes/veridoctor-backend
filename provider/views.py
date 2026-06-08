@@ -28,3 +28,24 @@ class ServiceView(APIView):
             return Response(serializer.errors, status=status.HTTP_400_BAD_REQUEST)
         except Identity.DoesNotExist:
             return Response({"error": "Identity not found"}, status=status.HTTP_404_NOT_FOUND)
+
+
+class ServiceDetailView(APIView):
+    def patch(self, request, identity_id, service_id):
+        try:
+            service = Service.objects.get(id=service_id)
+            serializer = ServiceSerializer(service, data=request.data, partial=True)
+            if serializer.is_valid():
+                serializer.save()
+                return Response(serializer.data, status=status.HTTP_200_OK)
+            return Response(serializer.errors, status=status.HTTP_400_BAD_REQUEST)
+        except Service.DoesNotExist:
+            return Response({"error": "Service not found"}, status=status.HTTP_404_NOT_FOUND)
+
+    def delete(self, request, identity_id, service_id):
+        try:
+            service = Service.objects.get(id=service_id)
+            service.delete()
+            return Response(status=status.HTTP_204_NO_CONTENT)
+        except Service.DoesNotExist:
+            return Response({"error": "Service not found"}, status=status.HTTP_404_NOT_FOUND)
