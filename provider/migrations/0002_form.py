@@ -6,7 +6,6 @@ import uuid
 class Migration(migrations.Migration):
 
     dependencies = [
-        ('provider', '0001_initial'),
     ]
 
     operations = [
