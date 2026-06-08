@@ -1,6 +1,7 @@
 from django.db import models
 from shared.models import BaseModel
 from django.core.exceptions import ValidationError
+from django.utils.crypto import get_random_string
 
 
 class BaseAppointment(models.Model):
@@ -32,12 +33,35 @@ class BaseAppointment(models.Model):
             raise ValidationError("End time must be after start time.")
 
 
-# class ProviderAppointment(BaseAppointment):
-#     """Purpose: Clinical consultations with a specific doctor"""
+class ProviderAppointment(BaseAppointment, BaseModel):
+    """Clinical consultations with a specific provider."""
 
-#     provider = models.ForeignKey("provider.Provider", on_delete=models.CASCADE)
-#     reason_for_visit = models.TextField()
-#     clinical_notes = models.TextField(blank=True)
+    APPOINTMENT_TYPE_CHOICES = [
+        ("virtual", "Virtual"),
+        ("physical", "Physical"),
+    ]
+
+    provider = models.ForeignKey(
+        "provider.HealthcareProvider",
+        on_delete=models.CASCADE,
+        related_name="appointments",
+    )
+    appointment_type = models.CharField(
+        max_length=20, choices=APPOINTMENT_TYPE_CHOICES, default="virtual"
+    )
+    message = models.TextField(blank=True)
+    meet_id = models.CharField(max_length=32, unique=True, blank=True)
+
+    class Meta:
+        ordering = ["start_time"]
+
+    def save(self, *args, **kwargs):
+        if not self.meet_id:
+            self.meet_id = get_random_string(16)
+        super().save(*args, **kwargs)
+
+    def __str__(self):
+        return f"{self.patient_first_name} {self.patient_last_name} - {self.start_time}"
 
 
 # class FacilityAppointment(BaseAppointment):
@@ -46,4 +70,3 @@ class BaseAppointment(models.Model):
 #     facility = models.ForeignKey("facility.Facility", on_delete=models.CASCADE)
 #     equipment_required = models.CharField(max_length=100, blank=True)
 #     prep_instructions = models.TextField(help_text="e.g., Fast for 12 hours")
-
