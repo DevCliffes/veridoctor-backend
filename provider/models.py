@@ -23,3 +23,13 @@ class Service(models.Model):
 
     def __str__(self):
         return self.name
+class Form(models.Model):
+    id = models.UUIDField(primary_key=True, default=uuid.uuid4, editable=False)
+    provider = models.ForeignKey(HealthcareProvider, on_delete=models.CASCADE, related_name="forms")
+    name = models.CharField(max_length=200)
+    sections = models.JSONField(default=list)
+    created_at = models.DateTimeField(auto_now_add=True)
+    updated_at = models.DateTimeField(auto_now=True)
+
+    def __str__(self):
+        return self.name
