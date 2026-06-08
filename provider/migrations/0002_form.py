@@ -1,5 +1,4 @@
 from django.db import migrations, models
-import django.db.models.deletion
 import uuid
 
 
@@ -9,15 +8,17 @@ class Migration(migrations.Migration):
     ]
 
     operations = [
-        migrations.CreateModel(
-            name='Form',
-            fields=[
-                ('id', models.UUIDField(primary_key=True, default=uuid.uuid4, serialize=False, editable=False)),
-                ('name', models.CharField(max_length=200)),
-                ('sections', models.JSONField(default=list)),
-                ('created_at', models.DateTimeField(auto_now_add=True)),
-                ('updated_at', models.DateTimeField(auto_now=True)),
-                ('provider', models.ForeignKey(on_delete=django.db.models.deletion.CASCADE, related_name='forms', to='provider.healthcareprovider')),
-            ],
+        migrations.RunSQL(
+            """
+            CREATE TABLE IF NOT EXISTS provider_form (
+                id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+                name VARCHAR(200) NOT NULL,
+                sections JSONB NOT NULL DEFAULT '[]',
+                created_at TIMESTAMP WITH TIME ZONE NOT NULL DEFAULT NOW(),
+                updated_at TIMESTAMP WITH TIME ZONE NOT NULL DEFAULT NOW(),
+                provider_id UUID NOT NULL REFERENCES provider_healthcareprovider(id) ON DELETE CASCADE
+            );
+            """,
+            reverse_sql="DROP TABLE IF EXISTS provider_form;"
         ),
     ]
