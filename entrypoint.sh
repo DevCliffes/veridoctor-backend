@@ -1,8 +1,10 @@
 #!/bin/bash
-BASE_COMMAND='python manage.py'
 
 # Create provider_form table directly if it doesn't exist
-python manage.py shell -c "
+python -c "
+import django, os
+os.environ.setdefault('DJANGO_SETTINGS_MODULE', 'config.settings')
+django.setup()
 from django.db import connection
 with connection.cursor() as cursor:
     cursor.execute('''
@@ -15,11 +17,11 @@ with connection.cursor() as cursor:
             provider_id uuid NOT NULL REFERENCES provider_healthcareprovider(id) ON DELETE CASCADE
         );
     ''')
+print('provider_form table ready')
 "
 
-# run migrations and collect static assets
-$BASE_COMMAND migrate --noinput --fake-initial
-$BASE_COMMAND collectstatic --noinput
+# run migrations and collect static assets  
+python manage.py migrate --noinput
+python manage.py collectstatic --noinput
 
-# start the django server
 exec "$@"
