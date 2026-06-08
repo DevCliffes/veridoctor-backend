@@ -1,12 +1,11 @@
-this is the backend code, give me the final code:
 from .models import HealthcareProvider, Service, Form
 from .serializers import ServiceSerializer, FormSerializer
 from rest_framework.views import APIView
 from rest_framework.response import Response
 from rest_framework import status
-from .models import HealthcareProvider, Service
-from .serializers import ServiceSerializer
 from identity.models import Identity
+
+
 class ServiceView(APIView):
     def get(self, request, identity_id):
         try:
@@ -17,6 +16,7 @@ class ServiceView(APIView):
             return Response(serializer.data, status=status.HTTP_200_OK)
         except (Identity.DoesNotExist, HealthcareProvider.DoesNotExist):
             return Response({"error": "Provider not found"}, status=status.HTTP_404_NOT_FOUND)
+
     def post(self, request, identity_id):
         try:
             identity = Identity.objects.get(id=identity_id)
@@ -28,6 +28,8 @@ class ServiceView(APIView):
             return Response(serializer.errors, status=status.HTTP_400_BAD_REQUEST)
         except Identity.DoesNotExist:
             return Response({"error": "Identity not found"}, status=status.HTTP_404_NOT_FOUND)
+
+
 class ServiceDetailView(APIView):
     def patch(self, request, identity_id, service_id):
         try:
@@ -39,6 +41,7 @@ class ServiceDetailView(APIView):
             return Response(serializer.errors, status=status.HTTP_400_BAD_REQUEST)
         except Service.DoesNotExist:
             return Response({"error": "Service not found"}, status=status.HTTP_404_NOT_FOUND)
+
     def delete(self, request, identity_id, service_id):
         try:
             service = Service.objects.get(id=service_id)
@@ -46,6 +49,8 @@ class ServiceDetailView(APIView):
             return Response(status=status.HTTP_204_NO_CONTENT)
         except Service.DoesNotExist:
             return Response({"error": "Service not found"}, status=status.HTTP_404_NOT_FOUND)
+
+
 class FormView(APIView):
     def get(self, request, identity_id):
         try:
@@ -56,6 +61,7 @@ class FormView(APIView):
             return Response(serializer.data, status=status.HTTP_200_OK)
         except (Identity.DoesNotExist, HealthcareProvider.DoesNotExist):
             return Response({"error": "Provider not found"}, status=status.HTTP_404_NOT_FOUND)
+
     def post(self, request, identity_id):
         try:
             identity = Identity.objects.get(id=identity_id)
@@ -67,3 +73,32 @@ class FormView(APIView):
             return Response(serializer.errors, status=status.HTTP_400_BAD_REQUEST)
         except Identity.DoesNotExist:
             return Response({"error": "Identity not found"}, status=status.HTTP_404_NOT_FOUND)
+
+
+class FormDetailView(APIView):
+    def get(self, request, identity_id, form_id):
+        try:
+            form = Form.objects.get(id=form_id)
+            serializer = FormSerializer(form)
+            return Response(serializer.data, status=status.HTTP_200_OK)
+        except Form.DoesNotExist:
+            return Response({"error": "Form not found"}, status=status.HTTP_404_NOT_FOUND)
+
+    def patch(self, request, identity_id, form_id):
+        try:
+            form = Form.objects.get(id=form_id)
+            serializer = FormSerializer(form, data=request.data, partial=True)
+            if serializer.is_valid():
+                serializer.save()
+                return Response(serializer.data, status=status.HTTP_200_OK)
+            return Response(serializer.errors, status=status.HTTP_400_BAD_REQUEST)
+        except Form.DoesNotExist:
+            return Response({"error": "Form not found"}, status=status.HTTP_404_NOT_FOUND)
+
+    def delete(self, request, identity_id, form_id):
+        try:
+            form = Form.objects.get(id=form_id)
+            form.delete()
+            return Response(status=status.HTTP_204_NO_CONTENT)
+        except Form.DoesNotExist:
+            return Response({"error": "Form not found"}, status=status.HTTP_404_NOT_FOUND)
