@@ -30,11 +30,11 @@ class ProviderAppointmentView(APIView):
             filter_value = request.query_params.get("filter")
             now = timezone.now()
             if filter_value == "today":
-            appointments = appointments.filter(start_time__date=now.date()).order_by("start_time")
+                appointments = appointments.filter(start_time__date=now.date()).order_by("start_time")
             elif filter_value == "upcoming":
-                appointments = appointments.filter(start_time__gte=now)
+                appointments = appointments.filter(start_time__gte=now).order_by("start_time")
             elif filter_value == "past":
-                appointments = appointments.filter(start_time__lt=now)
+                appointments = appointments.filter(start_time__lt=now).order_by("-start_time")
 
             serializer = ProviderAppointmentSerializer(appointments, many=True)
             return Response(serializer.data, status=status.HTTP_200_OK)
