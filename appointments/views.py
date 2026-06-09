@@ -30,7 +30,7 @@ class ProviderAppointmentView(APIView):
             filter_value = request.query_params.get("filter")
             now = timezone.now()
             if filter_value == "today":
-                appointments = appointments.filter(start_time__date=now.date())
+    appointments = appointments.filter(start_time__date=now.date()).order_by("start_time")
             elif filter_value == "upcoming":
                 appointments = appointments.filter(start_time__gte=now)
             elif filter_value == "past":
