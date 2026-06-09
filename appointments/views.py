@@ -33,6 +33,8 @@ class ProviderAppointmentView(APIView):
                 appointments = appointments.filter(start_time__date=now.date())
             elif filter_value == "upcoming":
                 appointments = appointments.filter(start_time__gte=now)
+            elif filter_value == "past":
+                appointments = appointments.filter(start_time__lt=now)
 
             serializer = ProviderAppointmentSerializer(appointments, many=True)
             return Response(serializer.data, status=status.HTTP_200_OK)
