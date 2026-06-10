@@ -124,6 +124,7 @@ class PrescriptionView(APIView):
                 provider=provider,
                 patient_id=request.data.get("patient_id", ""),
                 patient_name=request.data.get("patient_name", ""),
+                patient_email=request.data.get("patient_email", ""),
                 diagnosis=request.data.get("diagnosis", ""),
                 notes=request.data.get("notes", ""),
             )
@@ -131,7 +132,7 @@ class PrescriptionView(APIView):
             for drug in request.data.get("drugs", []):
                 PrescriptionDrug.objects.create(
                     prescription=prescription,
-                    name=drug.get("name", ""),
+                    drug_name=drug.get("drug_name", ""),
                     dosage=drug.get("dosage", ""),
                     frequency=drug.get("frequency", ""),
                     duration=drug.get("duration", ""),
@@ -160,3 +161,16 @@ class PrescriptionDetailView(APIView):
             return Response(status=status.HTTP_204_NO_CONTENT)
         except Prescription.DoesNotExist:
             return Response({"error": "Prescription not found"}, status=status.HTTP_404_NOT_FOUND)
+
+
+# Patient-facing endpoint — no identity_id needed, looks up by email
+class PatientPrescriptionView(APIView):
+    def get(self, request):
+        patient_email = request.query_params.get("patient_email")
+        if not patient_email:
+            return Response({"error": "patient_email query param required"}, status=status.HTTP_400_BAD_REQUEST)
+        prescriptions = Prescription.objects.filter(
+            patient_email=patient_email
+        ).order_by("-created_at")
+        serializer = PrescriptionSerializer(prescriptions, many=True)
+        return Response(serializer.data, status=status.HTTP_200_OK)
