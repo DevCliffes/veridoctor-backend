@@ -6,6 +6,7 @@ from .views import (
     FormDetailView,
     PrescriptionView,
     PrescriptionDetailView,
+    PatientPrescriptionView,
 )
 from appointments.views import ProviderAppointmentView, ProviderAppointmentDetailView
 
@@ -18,4 +19,7 @@ urlpatterns = [
     path("<str:identity_id>/appointments/<str:appointment_id>", ProviderAppointmentDetailView.as_view()),
     path("<str:identity_id>/prescriptions", PrescriptionView.as_view()),
     path("<str:identity_id>/prescriptions/<str:prescription_id>", PrescriptionDetailView.as_view()),
+
+    # Patient-facing — GET /provider/prescriptions?patient_email=xxx
+    path("prescriptions", PatientPrescriptionView.as_view()),
 ]
