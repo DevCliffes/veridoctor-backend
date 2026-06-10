@@ -1,5 +1,5 @@
-from rest_framework import serializers
 from .models import Service, HealthcareProvider, Form, Prescription, PrescriptionDrug
+from rest_framework import serializers
 
 
 class ServiceSerializer(serializers.ModelSerializer):
@@ -27,11 +27,13 @@ class FormSerializer(serializers.ModelSerializer):
 class PrescriptionDrugSerializer(serializers.ModelSerializer):
     class Meta:
         model = PrescriptionDrug
-        fields = ["id", "name", "dosage", "frequency", "duration", "instructions"]
+        fields = ["id", "drug_name", "dosage", "frequency", "duration", "instructions"]
+        read_only_fields = ["id"]
 
 
 class PrescriptionSerializer(serializers.ModelSerializer):
     drugs = PrescriptionDrugSerializer(many=True, read_only=True)
+    provider = serializers.SerializerMethodField()
 
     class Meta:
         model = Prescription
@@ -39,10 +41,20 @@ class PrescriptionSerializer(serializers.ModelSerializer):
             "id",
             "patient_id",
             "patient_name",
+            "patient_email",
             "diagnosis",
             "notes",
             "drugs",
+            "provider",
             "created_at",
             "updated_at",
         ]
         read_only_fields = ["id", "created_at", "updated_at"]
+
+    def get_provider(self, obj):
+        identity = obj.provider.identity
+        return {
+            "first_name": getattr(identity, "first_name", ""),
+            "last_name": getattr(identity, "last_name", ""),
+            "speciality": obj.provider.speciality,
+        }
