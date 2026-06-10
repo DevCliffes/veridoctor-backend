@@ -5,8 +5,10 @@ from django.contrib import admin
 from django.urls import path, include
 from django.http import HttpResponse
 
+
 def health_check(request):
     return HttpResponse("OK")
+
 
 urlpatterns = [
     path("health/", health_check),
@@ -14,4 +16,5 @@ urlpatterns = [
     path("identity/", include("identity.urls")),
     path("facility/", include("facility.urls")),
     path("provider/", include("provider.urls")),
+    path("appointments/", include("appointments.urls")),
 ]
