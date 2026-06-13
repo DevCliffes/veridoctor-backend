@@ -19,15 +19,22 @@ class ProviderAppointmentView(APIView):
             return Response({"error": "Provider not found"}, status=status.HTTP_404_NOT_FOUND)
 
         appointments = ProviderAppointment.objects.filter(provider=provider)
+        now = timezone.now()
 
-        filter_date = request.query_params.get("date")
-        if filter_date:
-            parsed = parse_datetime(filter_date + "T00:00:00Z")
-            if parsed:
-                appointments = appointments.filter(
-                    start_time__date=parsed.date()
-                )
+        filter_type = request.query_params.get("filter")
+        appointment_type = request.query_params.get("appointment_type")
 
+        if filter_type == "today":
+            appointments = appointments.filter(start_time__date=now.date())
+        elif filter_type == "upcoming":
+            appointments = appointments.filter(start_time__gt=now)
+        elif filter_type == "past":
+            appointments = appointments.filter(start_time__lt=now)
+
+        if appointment_type:
+            appointments = appointments.filter(appointment_type=appointment_type)
+
+        appointments = appointments.order_by("start_time")
         serializer = ProviderAppointmentSerializer(appointments, many=True)
         return Response(serializer.data)
 
@@ -75,13 +82,6 @@ class ProviderAppointmentDetailView(APIView):
 
 
 class PatientAppointmentView(APIView):
-    """
-    Patient-facing endpoint. Fetches appointments by patient_email.
-    GET /appointments?patient_email=john@example.com
-    GET /appointments?patient_email=john@example.com&filter=upcoming
-    GET /appointments?patient_email=john@example.com&filter=today
-    GET /appointments?patient_email=john@example.com&filter=past
-    """
     def get(self, request):
         patient_email = request.query_params.get("patient_email")
         if not patient_email:
@@ -91,7 +91,6 @@ class PatientAppointmentView(APIView):
             )
 
         appointments = ProviderAppointment.objects.filter(patient_email=patient_email)
-
         now = timezone.now()
         filter_type = request.query_params.get("filter", "upcoming")
 
@@ -99,7 +98,7 @@ class PatientAppointmentView(APIView):
             appointments = appointments.filter(start_time__date=now.date())
         elif filter_type == "past":
             appointments = appointments.filter(start_time__lt=now)
-        else:  # upcoming (default)
+        else:
             appointments = appointments.filter(start_time__gte=now)
 
         appointments = appointments.order_by("start_time")
@@ -107,7 +106,6 @@ class PatientAppointmentView(APIView):
         return Response(serializer.data)
 
     def patch(self, request):
-        """Cancel an appointment by ID — patient can only cancel, not delete."""
         appointment_id = request.query_params.get("appointment_id")
         if not appointment_id:
             return Response(
