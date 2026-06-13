@@ -1,3 +1,5 @@
+# provider/models.py — complete updated version
+
 from django.db import models
 import uuid
 from identity.models import Identity
@@ -12,6 +14,9 @@ class HealthcareProvider(models.Model):
     speciality = models.CharField(max_length=100, blank=True, null=True)
     created_at = models.DateTimeField(auto_now_add=True)
 
+    def __str__(self):
+        return f"{self.identity} — {self.speciality or 'Provider'}"
+
 
 class Service(models.Model):
     id = models.UUIDField(primary_key=True, default=uuid.uuid4, editable=False)
@@ -21,6 +26,10 @@ class Service(models.Model):
     price = models.DecimalField(max_digits=10, decimal_places=2)
     currency = models.CharField(max_length=10, default="KES")
     description = models.TextField(blank=True, null=True)
+    price_visible = models.BooleanField(
+        default=True,
+        help_text="Whether the price is shown publicly to patients when booking"
+    )
     created_at = models.DateTimeField(auto_now_add=True)
 
     def __str__(self):
