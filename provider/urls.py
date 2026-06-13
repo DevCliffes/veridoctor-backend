@@ -1,5 +1,6 @@
 from django.urls import path
 from .views import (
+    ProviderProfileView,
     ServiceView,
     ServiceDetailView,
     FormView,
@@ -16,6 +17,9 @@ from appointments.views import (
 )
 
 urlpatterns = [
+    # Profile
+    path("<str:identity_id>/profile", ProviderProfileView.as_view()),
+
     # Services
     path("<str:identity_id>/services", ServiceView.as_view()),
     path("<str:identity_id>/services/<str:service_id>", ServiceDetailView.as_view()),
