@@ -65,7 +65,9 @@ class ProviderAppointmentDetailView(APIView):
             appointment = ProviderAppointment.objects.get(id=appointment_id)
         except ProviderAppointment.DoesNotExist:
             return Response({"error": "Appointment not found"}, status=status.HTTP_404_NOT_FOUND)
-        serializer = ProviderAppointmentSerializer(appointment, data=request.data, partial=True)
+        serializer = ProviderAppointmentSerializer(
+            appointment, data=request.data, partial=True
+        )
         if serializer.is_valid():
             serializer.save()
             return Response(serializer.data)
@@ -97,22 +99,7 @@ class AppointmentCaptureView(APIView):
         except ProviderAppointment.DoesNotExist:
             return Response({"error": "Appointment not found"}, status=status.HTTP_404_NOT_FOUND)
 
-        # Optionally look up the form name from the provider's forms
-        form_name = request.data.get("form_name", "")
-        if not form_name:
-            # Try to resolve it from provider forms if form_id given
-            form_id = request.data.get("form_id", "")
-            try:
-                from provider.models import ProviderForm
-                form_obj = ProviderForm.objects.get(id=form_id)
-                form_name = form_obj.name
-            except Exception:
-                form_name = "Unknown Form"
-
-        serializer = AppointmentCaptureSerializer(data={
-            **request.data,
-            "form_name": form_name,
-        })
+        serializer = AppointmentCaptureSerializer(data=request.data)
         if serializer.is_valid():
             serializer.save(appointment=appointment)
             return Response(serializer.data, status=status.HTTP_201_CREATED)
