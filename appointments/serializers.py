@@ -1,6 +1,5 @@
 from rest_framework import serializers
-
-from .models import ProviderAppointment
+from .models import ProviderAppointment, AppointmentCapture
 
 
 class ProviderAppointmentSerializer(serializers.ModelSerializer):
@@ -27,7 +26,19 @@ class ProviderAppointmentSerializer(serializers.ModelSerializer):
         read_only_fields = ["id", "meet_id", "created_at", "updated_at"]
 
     def get_patient_name(self, appointment):
-        return (
-            f"{appointment.patient_first_name} {appointment.patient_last_name}".strip()
-        )
+        return f"{appointment.patient_first_name} {appointment.patient_last_name}".strip()
 
+
+class AppointmentCaptureSerializer(serializers.ModelSerializer):
+    class Meta:
+        model = AppointmentCapture
+        fields = [
+            "id",
+            "appointment",
+            "form_id",
+            "form_name",
+            "values",
+            "created_at",
+            "updated_at",
+        ]
+        read_only_fields = ["id", "appointment", "created_at", "updated_at"]
