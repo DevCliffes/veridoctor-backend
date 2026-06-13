@@ -1,13 +1,12 @@
-from datetime import timedelta
-from django.utils.dateparse import parse_datetime
 from django.utils import timezone
 from identity.models import Identity
 from provider.models import HealthcareProvider
 from rest_framework import status
 from rest_framework.response import Response
 from rest_framework.views import APIView
-from .models import ProviderAppointment
-from .serializers import ProviderAppointmentSerializer
+
+from .models import AppointmentCapture, ProviderAppointment
+from .serializers import AppointmentCaptureSerializer, ProviderAppointmentSerializer
 
 
 class ProviderAppointmentView(APIView):
@@ -81,13 +80,52 @@ class ProviderAppointmentDetailView(APIView):
         return Response(status=status.HTTP_204_NO_CONTENT)
 
 
+class AppointmentCaptureView(APIView):
+    def get(self, request, identity_id, appointment_id):
+        try:
+            appointment = ProviderAppointment.objects.get(id=appointment_id)
+        except ProviderAppointment.DoesNotExist:
+            return Response({"error": "Appointment not found"}, status=status.HTTP_404_NOT_FOUND)
+
+        captures = AppointmentCapture.objects.filter(appointment=appointment)
+        serializer = AppointmentCaptureSerializer(captures, many=True)
+        return Response(serializer.data)
+
+    def post(self, request, identity_id, appointment_id):
+        try:
+            appointment = ProviderAppointment.objects.get(id=appointment_id)
+        except ProviderAppointment.DoesNotExist:
+            return Response({"error": "Appointment not found"}, status=status.HTTP_404_NOT_FOUND)
+
+        # Optionally look up the form name from the provider's forms
+        form_name = request.data.get("form_name", "")
+        if not form_name:
+            # Try to resolve it from provider forms if form_id given
+            form_id = request.data.get("form_id", "")
+            try:
+                from provider.models import ProviderForm
+                form_obj = ProviderForm.objects.get(id=form_id)
+                form_name = form_obj.name
+            except Exception:
+                form_name = "Unknown Form"
+
+        serializer = AppointmentCaptureSerializer(data={
+            **request.data,
+            "form_name": form_name,
+        })
+        if serializer.is_valid():
+            serializer.save(appointment=appointment)
+            return Response(serializer.data, status=status.HTTP_201_CREATED)
+        return Response(serializer.errors, status=status.HTTP_400_BAD_REQUEST)
+
+
 class PatientAppointmentView(APIView):
     def get(self, request):
         patient_email = request.query_params.get("patient_email")
         if not patient_email:
             return Response(
                 {"error": "patient_email query parameter is required"},
-                status=status.HTTP_400_BAD_REQUEST
+                status=status.HTTP_400_BAD_REQUEST,
             )
 
         appointments = ProviderAppointment.objects.filter(patient_email=patient_email)
@@ -110,7 +148,7 @@ class PatientAppointmentView(APIView):
         if not appointment_id:
             return Response(
                 {"error": "appointment_id query parameter is required"},
-                status=status.HTTP_400_BAD_REQUEST
+                status=status.HTTP_400_BAD_REQUEST,
             )
         try:
             appointment = ProviderAppointment.objects.get(id=appointment_id)
