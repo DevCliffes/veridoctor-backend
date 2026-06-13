@@ -6,6 +6,56 @@ from rest_framework import status
 from identity.models import Identity
 
 
+class ProviderProfileView(APIView):
+    def get(self, request, identity_id):
+        try:
+            identity = Identity.objects.get(id=identity_id)
+            provider = HealthcareProvider.objects.get(identity=identity)
+        except (Identity.DoesNotExist, HealthcareProvider.DoesNotExist):
+            return Response({"error": "Provider not found"}, status=status.HTTP_404_NOT_FOUND)
+
+        return Response({
+            "first_name": identity.first_name,
+            "last_name": identity.last_name,
+            "email": identity.email,
+            "title": getattr(provider, "title", None),
+            "speciality": provider.speciality,
+            "phone_number": provider.phone_number,
+            "licence_number": provider.licence_number,
+            "licence_type": provider.licence_type,
+        })
+
+    def patch(self, request, identity_id):
+        try:
+            identity = Identity.objects.get(id=identity_id)
+            provider = HealthcareProvider.objects.get(identity=identity)
+        except (Identity.DoesNotExist, HealthcareProvider.DoesNotExist):
+            return Response({"error": "Provider not found"}, status=status.HTTP_404_NOT_FOUND)
+
+        # Update identity fields
+        for field in ["first_name", "last_name"]:
+            if field in request.data:
+                setattr(identity, field, request.data[field])
+        identity.save()
+
+        # Update provider fields
+        for field in ["speciality", "phone_number", "licence_number", "licence_type"]:
+            if field in request.data:
+                setattr(provider, field, request.data[field])
+        provider.save()
+
+        return Response({
+            "first_name": identity.first_name,
+            "last_name": identity.last_name,
+            "email": identity.email,
+            "title": getattr(provider, "title", None),
+            "speciality": provider.speciality,
+            "phone_number": provider.phone_number,
+            "licence_number": provider.licence_number,
+            "licence_type": provider.licence_type,
+        })
+
+
 class ServiceView(APIView):
     def get(self, request, identity_id):
         try:
@@ -163,7 +213,6 @@ class PrescriptionDetailView(APIView):
             return Response({"error": "Prescription not found"}, status=status.HTTP_404_NOT_FOUND)
 
 
-# Patient-facing endpoint — no identity_id needed, looks up by email
 class PatientPrescriptionView(APIView):
     def get(self, request):
         patient_email = request.query_params.get("patient_email")
