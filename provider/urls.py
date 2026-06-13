@@ -8,18 +8,32 @@ from .views import (
     PrescriptionDetailView,
     PatientPrescriptionView,
 )
-from appointments.views import ProviderAppointmentView, ProviderAppointmentDetailView
+from appointments.views import (
+    ProviderAppointmentView,
+    ProviderAppointmentDetailView,
+    AppointmentCaptureView,
+)
 
 urlpatterns = [
+    # Services
     path("<str:identity_id>/services", ServiceView.as_view()),
     path("<str:identity_id>/services/<str:service_id>", ServiceDetailView.as_view()),
+
+    # Forms
     path("<str:identity_id>/forms", FormView.as_view()),
     path("<str:identity_id>/forms/<str:form_id>", FormDetailView.as_view()),
+
+    # Appointments
     path("<str:identity_id>/appointments", ProviderAppointmentView.as_view()),
     path("<str:identity_id>/appointments/<str:appointment_id>", ProviderAppointmentDetailView.as_view()),
+
+    # Appointment captures
+    path("<str:identity_id>/appointments/<str:appointment_id>/captures", AppointmentCaptureView.as_view()),
+
+    # Prescriptions
     path("<str:identity_id>/prescriptions", PrescriptionView.as_view()),
     path("<str:identity_id>/prescriptions/<str:prescription_id>", PrescriptionDetailView.as_view()),
 
-    # Patient-facing — GET /provider/prescriptions?patient_email=xxx
+    # Patient-facing
     path("prescriptions", PatientPrescriptionView.as_view()),
 ]
