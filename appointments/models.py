@@ -6,7 +6,6 @@ from django.utils.crypto import get_random_string
 
 class BaseAppointment(models.Model):
     """Common fields for any type of appointment"""
-
     STATUS_CHOICES = [
         ("scheduled", "Scheduled"),
         ("confirmed", "Confirmed"),
@@ -14,7 +13,6 @@ class BaseAppointment(models.Model):
         ("cancelled", "Cancelled"),
         ("no-show", "No-show"),
     ]
-
     patient_first_name = models.CharField(max_length=255)
     patient_last_name = models.CharField(max_length=255)
     patient_email = models.EmailField(blank=True)
@@ -35,12 +33,10 @@ class BaseAppointment(models.Model):
 
 class ProviderAppointment(BaseAppointment, BaseModel):
     """Clinical consultations with a specific provider."""
-
     APPOINTMENT_TYPE_CHOICES = [
         ("virtual", "Virtual"),
         ("physical", "Physical"),
     ]
-
     provider = models.ForeignKey(
         "provider.HealthcareProvider",
         on_delete=models.CASCADE,
@@ -64,9 +60,19 @@ class ProviderAppointment(BaseAppointment, BaseModel):
         return f"{self.patient_first_name} {self.patient_last_name} - {self.start_time}"
 
 
-# class FacilityAppointment(BaseAppointment):
-#     """Purpose: Equipment/Room bookings (MRI, Lab, Surgery Suite)"""
+class AppointmentCapture(BaseModel):
+    """Patient data captured during a consultation using a provider form."""
+    appointment = models.ForeignKey(
+        ProviderAppointment,
+        on_delete=models.CASCADE,
+        related_name="captures",
+    )
+    form_id = models.CharField(max_length=255)
+    form_name = models.CharField(max_length=255, blank=True)
+    values = models.JSONField(default=dict)
 
-#     facility = models.ForeignKey("facility.Facility", on_delete=models.CASCADE)
-#     equipment_required = models.CharField(max_length=100, blank=True)
-#     prep_instructions = models.TextField(help_text="e.g., Fast for 12 hours")
+    class Meta:
+        ordering = ["-created_at"]
+
+    def __str__(self):
+        return f"Capture for {self.appointment} — {self.form_name}"
