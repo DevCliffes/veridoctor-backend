@@ -12,6 +12,7 @@ from appointments.views import (
     ProviderAppointmentView,
     ProviderAppointmentDetailView,
     AppointmentCaptureView,
+    ProviderDashboardStatsView,
 )
 
 urlpatterns = [
@@ -29,6 +30,9 @@ urlpatterns = [
 
     # Appointment captures
     path("<str:identity_id>/appointments/<str:appointment_id>/captures", AppointmentCaptureView.as_view()),
+
+    # Dashboard stats
+    path("<str:identity_id>/dashboard/stats", ProviderDashboardStatsView.as_view()),
 
     # Prescriptions
     path("<str:identity_id>/prescriptions", PrescriptionView.as_view()),
