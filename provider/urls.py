@@ -10,6 +10,8 @@ from .views import (
     PatientPrescriptionView,
     ProviderScheduleView,
     ProviderScheduleDetailView,
+    ProviderListView,
+    ProviderAvailableSlotsView,
 )
 from appointments.views import (
     ProviderAppointmentView,
@@ -19,8 +21,15 @@ from appointments.views import (
 )
 
 urlpatterns = [
+    # Provider directory (no identity_id)
+    path("list", ProviderListView.as_view()),
+    path("prescriptions", PatientPrescriptionView.as_view()),
+
     # Profile
     path("<str:identity_id>/profile", ProviderProfileView.as_view()),
+
+    # Available slots
+    path("<str:identity_id>/available-slots", ProviderAvailableSlotsView.as_view()),
 
     # Services
     path("<str:identity_id>/services", ServiceView.as_view()),
@@ -47,7 +56,4 @@ urlpatterns = [
     # Prescriptions
     path("<str:identity_id>/prescriptions", PrescriptionView.as_view()),
     path("<str:identity_id>/prescriptions/<str:prescription_id>", PrescriptionDetailView.as_view()),
-
-    # Patient-facing
-    path("prescriptions", PatientPrescriptionView.as_view()),
 ]
