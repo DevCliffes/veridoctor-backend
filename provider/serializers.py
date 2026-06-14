@@ -1,4 +1,4 @@
-from .models import Service, HealthcareProvider, Form, Prescription, PrescriptionDrug
+from .models import Service, HealthcareProvider, Form, Prescription, PrescriptionDrug, ProviderSchedule
 from rest_framework import serializers
 
 
@@ -12,6 +12,7 @@ class ServiceSerializer(serializers.ModelSerializer):
             "price",
             "currency",
             "description",
+            "price_visible",
             "created_at",
         ]
         read_only_fields = ["id", "created_at"]
@@ -58,3 +59,28 @@ class PrescriptionSerializer(serializers.ModelSerializer):
             "last_name": getattr(identity, "last_name", ""),
             "speciality": obj.provider.speciality,
         }
+
+
+class ProviderScheduleSerializer(serializers.ModelSerializer):
+    service_name = serializers.CharField(source="service.name", read_only=True, default=None)
+
+    class Meta:
+        model = ProviderSchedule
+        fields = [
+            "id",
+            "service",
+            "service_name",
+            "location_type",
+            "start_date",
+            "end_date",
+            "start_time",
+            "end_time",
+            "recurrence",
+            "recurrence_interval",
+            "recurrence_days",
+            "recurrence_end_type",
+            "recurrence_end_date",
+            "recurrence_count",
+            "created_at",
+        ]
+        read_only_fields = ["id", "created_at"]
