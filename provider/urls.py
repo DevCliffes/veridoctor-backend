@@ -8,6 +8,8 @@ from .views import (
     PrescriptionView,
     PrescriptionDetailView,
     PatientPrescriptionView,
+    ProviderScheduleView,
+    ProviderScheduleDetailView,
 )
 from appointments.views import (
     ProviderAppointmentView,
@@ -37,6 +39,10 @@ urlpatterns = [
 
     # Dashboard stats
     path("<str:identity_id>/dashboard/stats", ProviderDashboardStatsView.as_view()),
+
+    # Schedule
+    path("<str:identity_id>/schedule", ProviderScheduleView.as_view()),
+    path("<str:identity_id>/schedule/<str:schedule_id>", ProviderScheduleDetailView.as_view()),
 
     # Prescriptions
     path("<str:identity_id>/prescriptions", PrescriptionView.as_view()),
