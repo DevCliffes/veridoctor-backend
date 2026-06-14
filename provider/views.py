@@ -16,6 +16,8 @@ from rest_framework.views import APIView
 from rest_framework.response import Response
 from rest_framework import status
 from identity.models import Identity
+from datetime import date, datetime, timedelta
+from appointments.models import ProviderAppointment
 
 
 class ProviderProfileView(APIView):
@@ -282,3 +284,104 @@ class ProviderScheduleDetailView(APIView):
 
         schedule.delete()
         return Response(status=status.HTTP_204_NO_CONTENT)
+
+
+class ProviderListView(APIView):
+    def get(self, request):
+        speciality = request.query_params.get("speciality", "")
+        providers = HealthcareProvider.objects.select_related("identity").prefetch_related("services")
+        if speciality:
+            providers = providers.filter(speciality__icontains=speciality)
+
+        data = []
+        for p in providers:
+            services = list(p.services.filter(price_visible=True).values(
+                "id", "name", "price", "currency", "estimated_duration"
+            ))
+            data.append({
+                "id": str(p.identity.id),
+                "first_name": p.identity.first_name,
+                "last_name": p.identity.last_name,
+                "speciality": p.speciality,
+                "services": services,
+            })
+        return Response(data)
+
+
+class ProviderAvailableSlotsView(APIView):
+    def get(self, request, identity_id):
+        query_date_str = request.query_params.get("date")
+        if not query_date_str:
+            return Response({"error": "date param required (YYYY-MM-DD)"}, status=400)
+
+        try:
+            query_date = date.fromisoformat(query_date_str)
+        except ValueError:
+            return Response({"error": "Invalid date format"}, status=400)
+
+        try:
+            identity = Identity.objects.get(id=identity_id)
+            provider = HealthcareProvider.objects.get(identity=identity)
+        except (Identity.DoesNotExist, HealthcareProvider.DoesNotExist):
+            return Response({"error": "Provider not found"}, status=404)
+
+        python_dow = query_date.weekday()  # 0=Mon, 6=Sun
+        dow_abbr = ["Mon", "Tue", "Wed", "Thu", "Fri", "Sat", "Sun"][python_dow]
+
+        schedules = ProviderSchedule.objects.filter(
+            provider=provider,
+            start_date__lte=query_date,
+            end_date__gte=query_date,
+        )
+
+        matching = []
+        for s in schedules:
+            r = s.recurrence
+            if r == "none" and s.start_date == query_date:
+                matching.append(s)
+            elif r == "daily":
+                matching.append(s)
+            elif r == "weekdays" and python_dow < 5:
+                matching.append(s)
+            elif r in ("weekly", "custom") and dow_abbr in (s.recurrence_days or []):
+                matching.append(s)
+
+        booked = ProviderAppointment.objects.filter(
+            provider=provider,
+            start_time__date=query_date,
+            status__in=["scheduled", "confirmed", "in-progress"],
+        ).values_list("start_time", "end_time")
+
+        booked_ranges = [
+            (s.replace(tzinfo=None), e.replace(tzinfo=None))
+            for s, e in booked
+        ]
+
+        slots = []
+        seen = set()
+        for s in matching:
+            start_dt = datetime.combine(query_date, s.start_time)
+            end_dt = datetime.combine(query_date, s.end_time)
+            duration = s.service.estimated_duration if s.service else 30
+            cursor = start_dt
+            while cursor + timedelta(minutes=duration) <= end_dt:
+                slot_end = cursor + timedelta(minutes=duration)
+                key = cursor.isoformat()
+                if key not in seen:
+                    overlaps = any(
+                        not (slot_end <= bs or cursor >= be)
+                        for bs, be in booked_ranges
+                    )
+                    if not overlaps:
+                        slots.append({
+                            "start_time": cursor.isoformat(),
+                            "end_time": slot_end.isoformat(),
+                            "service_id": str(s.service.id) if s.service else None,
+                            "service_name": s.service.name if s.service else None,
+                            "location_type": s.location_type,
+                            "duration_minutes": duration,
+                        })
+                    seen.add(key)
+                cursor += timedelta(minutes=duration)
+
+        return Response(slots)
