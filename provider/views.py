@@ -1,5 +1,17 @@
-from .models import HealthcareProvider, Service, Form, Prescription, PrescriptionDrug
-from .serializers import ServiceSerializer, FormSerializer, PrescriptionSerializer
+from .models import (
+    HealthcareProvider,
+    Service,
+    Form,
+    Prescription,
+    PrescriptionDrug,
+    ProviderSchedule,
+)
+from .serializers import (
+    ServiceSerializer,
+    FormSerializer,
+    PrescriptionSerializer,
+    ProviderScheduleSerializer,
+)
 from rest_framework.views import APIView
 from rest_framework.response import Response
 from rest_framework import status
@@ -32,13 +44,11 @@ class ProviderProfileView(APIView):
         except (Identity.DoesNotExist, HealthcareProvider.DoesNotExist):
             return Response({"error": "Provider not found"}, status=status.HTTP_404_NOT_FOUND)
 
-        # Update identity fields
         for field in ["first_name", "last_name"]:
             if field in request.data:
                 setattr(identity, field, request.data[field])
         identity.save()
 
-        # Update provider fields
         for field in ["speciality", "phone_number", "licence_number", "licence_type"]:
             if field in request.data:
                 setattr(provider, field, request.data[field])
@@ -223,3 +233,52 @@ class PatientPrescriptionView(APIView):
         ).order_by("-created_at")
         serializer = PrescriptionSerializer(prescriptions, many=True)
         return Response(serializer.data, status=status.HTTP_200_OK)
+
+
+class ProviderScheduleView(APIView):
+    def get(self, request, identity_id):
+        try:
+            identity = Identity.objects.get(id=identity_id)
+            provider = HealthcareProvider.objects.get(identity=identity)
+        except (Identity.DoesNotExist, HealthcareProvider.DoesNotExist):
+            return Response({"error": "Provider not found"}, status=status.HTTP_404_NOT_FOUND)
+
+        schedules = ProviderSchedule.objects.filter(provider=provider).order_by("start_date", "start_time")
+        serializer = ProviderScheduleSerializer(schedules, many=True)
+        return Response(serializer.data, status=status.HTTP_200_OK)
+
+    def post(self, request, identity_id):
+        try:
+            identity = Identity.objects.get(id=identity_id)
+            provider, _ = HealthcareProvider.objects.get_or_create(identity=identity)
+        except Identity.DoesNotExist:
+            return Response({"error": "Identity not found"}, status=status.HTTP_404_NOT_FOUND)
+
+        serializer = ProviderScheduleSerializer(data=request.data)
+        if serializer.is_valid():
+            serializer.save(provider=provider)
+            return Response(serializer.data, status=status.HTTP_201_CREATED)
+        return Response(serializer.errors, status=status.HTTP_400_BAD_REQUEST)
+
+
+class ProviderScheduleDetailView(APIView):
+    def patch(self, request, identity_id, schedule_id):
+        try:
+            schedule = ProviderSchedule.objects.get(id=schedule_id)
+        except ProviderSchedule.DoesNotExist:
+            return Response({"error": "Schedule not found"}, status=status.HTTP_404_NOT_FOUND)
+
+        serializer = ProviderScheduleSerializer(schedule, data=request.data, partial=True)
+        if serializer.is_valid():
+            serializer.save()
+            return Response(serializer.data, status=status.HTTP_200_OK)
+        return Response(serializer.errors, status=status.HTTP_400_BAD_REQUEST)
+
+    def delete(self, request, identity_id, schedule_id):
+        try:
+            schedule = ProviderSchedule.objects.get(id=schedule_id)
+        except ProviderSchedule.DoesNotExist:
+            return Response({"error": "Schedule not found"}, status=status.HTTP_404_NOT_FOUND)
+
+        schedule.delete()
+        return Response(status=status.HTTP_204_NO_CONTENT)
