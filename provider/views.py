@@ -32,11 +32,19 @@ class ProviderProfileView(APIView):
             "first_name": identity.first_name,
             "last_name": identity.last_name,
             "email": identity.email,
-            "title": getattr(provider, "title", None),
-            "speciality": provider.speciality,
-            "phone_number": provider.phone_number,
-            "licence_number": provider.licence_number,
-            "licence_type": provider.licence_type,
+            "title": provider.title or "Dr.",
+            "speciality": provider.speciality or "",
+            "phone_number": provider.phone_number or "",
+            "licence_number": provider.licence_number or "",
+            "licence_type": provider.licence_type or "",
+            "clinic_name": provider.clinic_name or "",
+            "address": provider.address or "",
+            "county": provider.county or "",
+            "country": provider.country or "Kenya",
+            "bio": provider.bio or "",
+            "insurances_accepted": provider.insurances_accepted or [],
+            "languages": provider.languages or ["English"],
+            "profile_picture_url": provider.profile_picture_url or "",
         })
 
     def patch(self, request, identity_id):
@@ -51,21 +59,16 @@ class ProviderProfileView(APIView):
                 setattr(identity, field, request.data[field])
         identity.save()
 
-        for field in ["speciality", "phone_number", "licence_number", "licence_type"]:
+        for field in [
+            "speciality", "phone_number", "licence_number", "licence_type",
+            "title", "clinic_name", "address", "county", "country",
+            "bio", "insurances_accepted", "languages", "profile_picture_url",
+        ]:
             if field in request.data:
                 setattr(provider, field, request.data[field])
         provider.save()
 
-        return Response({
-            "first_name": identity.first_name,
-            "last_name": identity.last_name,
-            "email": identity.email,
-            "title": getattr(provider, "title", None),
-            "speciality": provider.speciality,
-            "phone_number": provider.phone_number,
-            "licence_number": provider.licence_number,
-            "licence_type": provider.licence_type,
-        })
+        return Response({"success": True})
 
 
 class ServiceView(APIView):
@@ -303,6 +306,11 @@ class ProviderListView(APIView):
                 "first_name": p.identity.first_name,
                 "last_name": p.identity.last_name,
                 "speciality": p.speciality,
+                "clinic_name": p.clinic_name or "",
+                "county": p.county or "",
+                "bio": p.bio or "",
+                "languages": p.languages or [],
+                "insurances_accepted": p.insurances_accepted or [],
                 "services": services,
             })
         return Response(data)
@@ -325,7 +333,7 @@ class ProviderAvailableSlotsView(APIView):
         except (Identity.DoesNotExist, HealthcareProvider.DoesNotExist):
             return Response({"error": "Provider not found"}, status=404)
 
-        python_dow = query_date.weekday()  # 0=Mon, 6=Sun
+        python_dow = query_date.weekday()
         dow_abbr = ["Mon", "Tue", "Wed", "Thu", "Fri", "Sat", "Sun"][python_dow]
 
         schedules = ProviderSchedule.objects.filter(
