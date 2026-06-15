@@ -10,6 +10,15 @@ class HealthcareProvider(models.Model):
     licence_number = models.CharField(max_length=100, blank=True, null=True)
     licence_type = models.CharField(max_length=100, blank=True, null=True)
     speciality = models.CharField(max_length=100, blank=True, null=True)
+    title = models.CharField(max_length=20, blank=True, null=True, default="Dr.")
+    clinic_name = models.CharField(max_length=200, blank=True, null=True)
+    address = models.CharField(max_length=300, blank=True, null=True)
+    county = models.CharField(max_length=100, blank=True, null=True)
+    country = models.CharField(max_length=100, blank=True, null=True, default="Kenya")
+    bio = models.TextField(blank=True, null=True)
+    insurances_accepted = models.JSONField(default=list, blank=True)
+    languages = models.JSONField(default=list, blank=True)
+    profile_picture_url = models.URLField(blank=True, null=True)
     created_at = models.DateTimeField(auto_now_add=True)
 
     def __str__(self):
