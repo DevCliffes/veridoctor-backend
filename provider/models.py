@@ -124,6 +124,12 @@ class ProviderSchedule(models.Model):
     )
     recurrence_end_date = models.DateField(null=True, blank=True)
     recurrence_count = models.PositiveIntegerField(null=True, blank=True)
+    excluded_dates = models.JSONField(
+        default=list,
+        blank=True,
+        help_text="ISO date strings (YYYY-MM-DD) to skip for recurring schedules — "
+                   "used when deleting/editing a single occurrence instead of the whole series."
+    )
 
     created_at = models.DateTimeField(auto_now_add=True)
 
