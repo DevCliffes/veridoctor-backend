@@ -81,6 +81,7 @@ class ProviderScheduleSerializer(serializers.ModelSerializer):
             "recurrence_end_type",
             "recurrence_end_date",
             "recurrence_count",
+            "excluded_dates",
             "created_at",
         ]
         read_only_fields = ["id", "created_at"]
