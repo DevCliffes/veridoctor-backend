@@ -285,6 +285,23 @@ class ProviderScheduleDetailView(APIView):
         except ProviderSchedule.DoesNotExist:
             return Response({"error": "Schedule not found"}, status=status.HTTP_404_NOT_FOUND)
 
+        occurrence_date = request.query_params.get("occurrence_date")
+        delete_series = request.query_params.get("delete_series") == "true"
+
+        # If this is a recurring block and the caller targeted a single
+        # occurrence (and didn't explicitly ask to delete the whole series),
+        # just add that date to excluded_dates instead of deleting everything.
+        if schedule.recurrence != "none" and occurrence_date and not delete_series:
+            excluded = schedule.excluded_dates or []
+            if occurrence_date not in excluded:
+                excluded.append(occurrence_date)
+            schedule.excluded_dates = excluded
+            schedule.save(update_fields=["excluded_dates"])
+            return Response(
+                ProviderScheduleSerializer(schedule).data,
+                status=status.HTTP_200_OK,
+            )
+
         schedule.delete()
         return Response(status=status.HTTP_204_NO_CONTENT)
 
@@ -335,6 +352,7 @@ class ProviderAvailableSlotsView(APIView):
 
         python_dow = query_date.weekday()
         dow_abbr = ["Mon", "Tue", "Wed", "Thu", "Fri", "Sat", "Sun"][python_dow]
+        query_date_str_iso = query_date.isoformat()
 
         schedules = ProviderSchedule.objects.filter(
             provider=provider,
@@ -344,6 +362,10 @@ class ProviderAvailableSlotsView(APIView):
 
         matching = []
         for s in schedules:
+            # Skip if this occurrence date was explicitly excluded by the provider
+            if query_date_str_iso in (s.excluded_dates or []):
+                continue
+
             r = s.recurrence
             if r == "none" and s.start_date == query_date:
                 matching.append(s)
