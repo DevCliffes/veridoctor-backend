@@ -150,12 +150,11 @@ class ProviderDashboardStatsView(APIView):
         this_week_appointments = week_qs.count()
         this_week_patients = week_qs.values("patient_email").distinct().count()
 
-        # Monthly distinct patients
+        # Total patients served this month — every appointment counts,
+        # including repeat visits from the same patient. Cancelled
+        # appointments don't count as "served".
         month_qs = base_qs.filter(start_time__gte=month_start)
-        total_patients_month = month_qs.values("patient_email").distinct().count()
-
-        # All-time distinct patients (this is the real "Total Patients" figure)
-        total_patients = base_qs.values("patient_email").distinct().count()
+        total_patients_month = month_qs.exclude(status="cancelled").count()
 
         # Average duration this month — exclude cancelled
         month_with_duration = month_qs.exclude(status="cancelled").annotate(
@@ -184,7 +183,6 @@ class ProviderDashboardStatsView(APIView):
             "this_week_appointments": this_week_appointments,
             "this_week_patients": this_week_patients,
             "total_patients_month": total_patients_month,
-            "total_patients": total_patients,
             "avg_duration_minutes": avg_duration_minutes,
             "weekly_data": weekly_data,
         })
