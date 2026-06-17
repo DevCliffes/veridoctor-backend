@@ -7,7 +7,6 @@ class ProviderAppointmentSerializer(serializers.ModelSerializer):
     service_name = serializers.CharField(
         source="service.name", read_only=True, default=None
     )
-
     class Meta:
         model = ProviderAppointment
         fields = [
@@ -17,6 +16,7 @@ class ProviderAppointmentSerializer(serializers.ModelSerializer):
             "patient_name",
             "patient_email",
             "patient_phone_number",
+            "patient_identity",
             "appointment_type",
             "service",
             "service_name",
@@ -28,8 +28,7 @@ class ProviderAppointmentSerializer(serializers.ModelSerializer):
             "created_at",
             "updated_at",
         ]
-        read_only_fields = ["id", "meet_id", "created_at", "updated_at"]
-
+        read_only_fields = ["id", "patient_identity", "meet_id", "created_at", "updated_at"]
     def get_patient_name(self, appointment):
         return f"{appointment.patient_first_name} {appointment.patient_last_name}".strip()
 
