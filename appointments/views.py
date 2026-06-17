@@ -7,6 +7,8 @@ from rest_framework.response import Response
 from rest_framework.views import APIView
 from datetime import timedelta
 
+from records.services import find_identity_by_email, refresh_record_summary
+
 from .models import AppointmentCapture, ProviderAppointment
 from .serializers import AppointmentCaptureSerializer, ProviderAppointmentSerializer
 
@@ -52,8 +54,10 @@ class ProviderAppointmentView(APIView):
 
         serializer = ProviderAppointmentSerializer(data=request.data)
         if serializer.is_valid():
-            serializer.save(provider=provider)
-            return Response(serializer.data, status=status.HTTP_201_CREATED)
+            patient_identity = find_identity_by_email(request.data.get("patient_email"))
+            appointment = serializer.save(provider=provider, patient_identity=patient_identity)
+            refresh_record_summary(patient_identity, provider)
+            return Response(ProviderAppointmentSerializer(appointment).data, status=status.HTTP_201_CREATED)
         return Response(serializer.errors, status=status.HTTP_400_BAD_REQUEST)
 
 
@@ -118,8 +122,9 @@ class AppointmentCaptureView(APIView):
         data = {**request.data, "form_snapshot": form_snapshot}
         serializer = AppointmentCaptureSerializer(data=data)
         if serializer.is_valid():
-            serializer.save(appointment=appointment)
-            return Response(serializer.data, status=status.HTTP_201_CREATED)
+            capture = serializer.save(appointment=appointment)
+            refresh_record_summary(appointment.patient_identity, appointment.provider)
+            return Response(AppointmentCaptureSerializer(capture).data, status=status.HTTP_201_CREATED)
         return Response(serializer.errors, status=status.HTTP_400_BAD_REQUEST)
 
 
@@ -135,41 +140,31 @@ class ProviderDashboardStatsView(APIView):
         local_now = now.astimezone(timezone.get_current_timezone())
         today = local_now.date()
 
-        # This week Mon–Sun
         week_start = now - timedelta(days=now.weekday())
         week_start = week_start.replace(hour=0, minute=0, second=0, microsecond=0)
         week_end = week_start + timedelta(days=7)
 
-        # This month
         month_start = now.replace(day=1, hour=0, minute=0, second=0, microsecond=0)
 
         base_qs = ProviderAppointment.objects.filter(provider=provider)
 
-        # Today
         today_qs = base_qs.filter(start_time__date=today)
         today_count = today_qs.count()
 
-        # Upcoming today (future, not cancelled)
         upcoming_today = today_qs.filter(
             start_time__gt=now,
             status__in=["scheduled", "confirmed"]
         ).count()
 
-        # Pending (scheduled but not yet confirmed)
         pending_count = base_qs.filter(status="scheduled").count()
 
-        # This week
         week_qs = base_qs.filter(start_time__gte=week_start, start_time__lt=week_end)
         this_week_appointments = week_qs.count()
         this_week_patients = week_qs.values("patient_email").distinct().count()
 
-        # Total patients served this month — every appointment counts,
-        # including repeat visits from the same patient. Cancelled
-        # appointments don't count as "served".
         month_qs = base_qs.filter(start_time__gte=month_start)
         total_patients_month = month_qs.exclude(status="cancelled").count()
 
-        # Average duration this month — exclude cancelled
         month_with_duration = month_qs.exclude(status="cancelled").annotate(
             duration=ExpressionWrapper(
                 F("end_time") - F("start_time"), output_field=DurationField()
@@ -178,7 +173,6 @@ class ProviderDashboardStatsView(APIView):
         avg_duration_td = month_with_duration.aggregate(avg=Avg("duration"))["avg"]
         avg_duration_minutes = int(avg_duration_td.total_seconds() / 60) if avg_duration_td else 0
 
-        # Weekly chart — last 7 days by local date
         weekly_data = []
         for i in range(6, -1, -1):
             day = (local_now - timedelta(days=i)).date()
