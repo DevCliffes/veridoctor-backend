@@ -61,6 +61,16 @@ class Prescription(models.Model):
     patient_id = models.CharField(max_length=255, blank=True)
     patient_name = models.CharField(max_length=255, blank=True, null=True)
     patient_email = models.EmailField(blank=True, null=True, db_index=True)
+    patient_identity = models.ForeignKey(
+        Identity,
+        on_delete=models.SET_NULL,
+        null=True,
+        blank=True,
+        related_name="prescriptions_received",
+        help_text="Linked automatically by matching patient_email to an "
+                   "Identity at creation time. May be null for older "
+                   "records until the backfill command links them.",
+    )
     diagnosis = models.TextField(blank=True, null=True)
     notes = models.TextField(blank=True, null=True)
     created_at = models.DateTimeField(auto_now_add=True)
