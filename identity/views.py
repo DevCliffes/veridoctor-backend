@@ -68,6 +68,16 @@ class RegisterView(APIView):
     authentication_classes = [TokenAuthentication]
     queryset = Identity.objects.all()
 
+    def get(self, request, identity_id):
+        """fetches an existing identity's full details, used for profile editing"""
+        if not identity_id:
+            return Response(
+                {"error": "bad request"}, status=status.HTTP_400_BAD_REQUEST
+            )
+        identity = get_object_or_404(Identity, id=identity_id)
+        serializer = IdentitySerializer(identity)
+        return Response(serializer.data, status=status.HTTP_200_OK)
+
     def post(self, request):
         """creates a new identity on the system"""
         if not request.data:
