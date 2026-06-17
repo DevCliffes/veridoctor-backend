@@ -260,7 +260,18 @@ class ProviderScheduleView(APIView):
         except Identity.DoesNotExist:
             return Response({"error": "Identity not found"}, status=status.HTTP_404_NOT_FOUND)
 
-        serializer = ProviderScheduleSerializer(data=request.data)
+        data = request.data.copy()
+
+        # For never-ending recurring schedules, push end_date far into the
+        # future so the availability filter (end_date__gte=query_date) never
+        # cuts them off.
+        if (
+            data.get("recurrence", "none") != "none"
+            and data.get("recurrence_end_type") in (None, "never", "")
+        ):
+            data["end_date"] = "2099-12-31"
+
+        serializer = ProviderScheduleSerializer(data=data)
         if serializer.is_valid():
             serializer.save(provider=provider)
             return Response(serializer.data, status=status.HTTP_201_CREATED)
@@ -274,7 +285,19 @@ class ProviderScheduleDetailView(APIView):
         except ProviderSchedule.DoesNotExist:
             return Response({"error": "Schedule not found"}, status=status.HTTP_404_NOT_FOUND)
 
-        serializer = ProviderScheduleSerializer(schedule, data=request.data, partial=True)
+        data = request.data.copy()
+
+        # Same never-ending fix on edit — don't let end_date shrink back
+        # to a past date when the recurrence is still set to "never".
+        effective_recurrence = data.get("recurrence", schedule.recurrence)
+        effective_end_type = data.get("recurrence_end_type", schedule.recurrence_end_type)
+        if (
+            effective_recurrence != "none"
+            and effective_end_type in (None, "never", "")
+        ):
+            data["end_date"] = "2099-12-31"
+
+        serializer = ProviderScheduleSerializer(schedule, data=data, partial=True)
         if serializer.is_valid():
             serializer.save()
             return Response(serializer.data, status=status.HTTP_200_OK)
@@ -373,7 +396,7 @@ class ProviderAvailableSlotsView(APIView):
                 matching.append(s)
 
         # Build booked ranges as naive local datetimes so they compare
-        # correctly against the naive slot datetimes we generate below.
+        # correctly against the naive slot datetimes generated below.
         booked_qs = ProviderAppointment.objects.filter(
             provider=provider,
             start_time__date=query_date,
@@ -383,7 +406,6 @@ class ProviderAvailableSlotsView(APIView):
         local_tz = dj_timezone.get_current_timezone()
         booked_ranges = []
         for utc_start, utc_end in booked_qs:
-            # Convert UTC-aware datetimes to naive local datetimes
             local_start = utc_start.astimezone(local_tz).replace(tzinfo=None)
             local_end = utc_end.astimezone(local_tz).replace(tzinfo=None)
             booked_ranges.append((local_start, local_end))
