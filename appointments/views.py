@@ -103,7 +103,20 @@ class AppointmentCaptureView(APIView):
         except ProviderAppointment.DoesNotExist:
             return Response({"error": "Appointment not found"}, status=status.HTTP_404_NOT_FOUND)
 
-        serializer = AppointmentCaptureSerializer(data=request.data)
+        # Snapshot the form sections at capture time so the data remains
+        # readable even if the form is later edited or deleted.
+        from provider.models import Form
+        form_snapshot = []
+        form_id = request.data.get("form_id")
+        if form_id:
+            try:
+                form = Form.objects.get(id=form_id)
+                form_snapshot = form.sections
+            except Form.DoesNotExist:
+                pass
+
+        data = {**request.data, "form_snapshot": form_snapshot}
+        serializer = AppointmentCaptureSerializer(data=data)
         if serializer.is_valid():
             serializer.save(appointment=appointment)
             return Response(serializer.data, status=status.HTTP_201_CREATED)
