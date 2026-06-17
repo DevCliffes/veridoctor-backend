@@ -4,6 +4,9 @@ from .models import ProviderAppointment, AppointmentCapture
 
 class ProviderAppointmentSerializer(serializers.ModelSerializer):
     patient_name = serializers.SerializerMethodField()
+    service_name = serializers.CharField(
+        source="service.name", read_only=True, default=None
+    )
 
     class Meta:
         model = ProviderAppointment
@@ -15,6 +18,8 @@ class ProviderAppointmentSerializer(serializers.ModelSerializer):
             "patient_email",
             "patient_phone_number",
             "appointment_type",
+            "service",
+            "service_name",
             "message",
             "start_time",
             "end_time",
