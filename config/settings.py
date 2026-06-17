@@ -51,6 +51,7 @@ INSTALLED_APPS = [
     "scheduling",
     "appointments",
     "shared",
+    "records",
 ]
 
 REST_FRAMEWORK = {
