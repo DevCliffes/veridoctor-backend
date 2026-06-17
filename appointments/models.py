@@ -69,6 +69,12 @@ class AppointmentCapture(BaseModel):
     )
     form_id = models.CharField(max_length=255)
     form_name = models.CharField(max_length=255, blank=True)
+    form_snapshot = models.JSONField(
+        default=list,
+        blank=True,
+        help_text="Snapshot of the form sections at the time of capture, "
+                  "so data remains readable even if the form is later edited or deleted."
+    )
     values = models.JSONField(default=dict)
 
     class Meta:
