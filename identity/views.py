@@ -139,6 +139,7 @@ class RegisterView(APIView):
         identity.is_active = False
         identity.email_verified = False
         identity.deleted_at = timezone.now()
+        identity.save()
         return Response({}, status=status.HTTP_204_NO_CONTENT)
 
 
