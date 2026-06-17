@@ -35,7 +35,6 @@ class PrescriptionDrugSerializer(serializers.ModelSerializer):
 class PrescriptionSerializer(serializers.ModelSerializer):
     drugs = PrescriptionDrugSerializer(many=True, read_only=True)
     provider = serializers.SerializerMethodField()
-
     class Meta:
         model = Prescription
         fields = [
@@ -43,6 +42,7 @@ class PrescriptionSerializer(serializers.ModelSerializer):
             "patient_id",
             "patient_name",
             "patient_email",
+            "patient_identity",
             "diagnosis",
             "notes",
             "drugs",
@@ -50,8 +50,7 @@ class PrescriptionSerializer(serializers.ModelSerializer):
             "created_at",
             "updated_at",
         ]
-        read_only_fields = ["id", "created_at", "updated_at"]
-
+        read_only_fields = ["id", "patient_identity", "created_at", "updated_at"]
     def get_provider(self, obj):
         identity = obj.provider.identity
         return {
@@ -63,7 +62,6 @@ class PrescriptionSerializer(serializers.ModelSerializer):
 
 class ProviderScheduleSerializer(serializers.ModelSerializer):
     service_name = serializers.CharField(source="service.name", read_only=True, default=None)
-
     class Meta:
         model = ProviderSchedule
         fields = [
