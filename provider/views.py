@@ -17,6 +17,7 @@ from rest_framework.response import Response
 from rest_framework import status
 from identity.models import Identity
 from datetime import date, datetime, timedelta
+from django.utils import timezone as dj_timezone
 from appointments.models import ProviderAppointment
 
 
@@ -288,9 +289,6 @@ class ProviderScheduleDetailView(APIView):
         occurrence_date = request.query_params.get("occurrence_date")
         delete_series = request.query_params.get("delete_series") == "true"
 
-        # If this is a recurring block and the caller targeted a single
-        # occurrence (and didn't explicitly ask to delete the whole series),
-        # just add that date to excluded_dates instead of deleting everything.
         if schedule.recurrence != "none" and occurrence_date and not delete_series:
             excluded = schedule.excluded_dates or []
             if occurrence_date not in excluded:
@@ -362,10 +360,8 @@ class ProviderAvailableSlotsView(APIView):
 
         matching = []
         for s in schedules:
-            # Skip if this occurrence date was explicitly excluded by the provider
             if query_date_str_iso in (s.excluded_dates or []):
                 continue
-
             r = s.recurrence
             if r == "none" and s.start_date == query_date:
                 matching.append(s)
@@ -376,16 +372,21 @@ class ProviderAvailableSlotsView(APIView):
             elif r in ("weekly", "custom") and dow_abbr in (s.recurrence_days or []):
                 matching.append(s)
 
-        booked = ProviderAppointment.objects.filter(
+        # Build booked ranges as naive local datetimes so they compare
+        # correctly against the naive slot datetimes we generate below.
+        booked_qs = ProviderAppointment.objects.filter(
             provider=provider,
             start_time__date=query_date,
             status__in=["scheduled", "confirmed", "in-progress"],
         ).values_list("start_time", "end_time")
 
-        booked_ranges = [
-            (s.replace(tzinfo=None), e.replace(tzinfo=None))
-            for s, e in booked
-        ]
+        local_tz = dj_timezone.get_current_timezone()
+        booked_ranges = []
+        for utc_start, utc_end in booked_qs:
+            # Convert UTC-aware datetimes to naive local datetimes
+            local_start = utc_start.astimezone(local_tz).replace(tzinfo=None)
+            local_end = utc_end.astimezone(local_tz).replace(tzinfo=None)
+            booked_ranges.append((local_start, local_end))
 
         slots = []
         seen = set()
