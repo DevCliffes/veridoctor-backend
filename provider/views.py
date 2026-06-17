@@ -19,6 +19,7 @@ from identity.models import Identity
 from datetime import date, datetime, timedelta
 from django.utils import timezone as dj_timezone
 from appointments.models import ProviderAppointment
+from records.services import find_identity_by_email, refresh_record_summary
 
 
 class ProviderProfileView(APIView):
@@ -186,11 +187,14 @@ class PrescriptionView(APIView):
             identity = Identity.objects.get(id=identity_id)
             provider, _ = HealthcareProvider.objects.get_or_create(identity=identity)
 
+            patient_identity = find_identity_by_email(request.data.get("patient_email"))
+
             prescription = Prescription.objects.create(
                 provider=provider,
                 patient_id=request.data.get("patient_id", ""),
                 patient_name=request.data.get("patient_name", ""),
                 patient_email=request.data.get("patient_email", ""),
+                patient_identity=patient_identity,
                 diagnosis=request.data.get("diagnosis", ""),
                 notes=request.data.get("notes", ""),
             )
@@ -204,6 +208,8 @@ class PrescriptionView(APIView):
                     duration=drug.get("duration", ""),
                     instructions=drug.get("instructions", ""),
                 )
+
+            refresh_record_summary(patient_identity, provider)
 
             serializer = PrescriptionSerializer(prescription)
             return Response(serializer.data, status=status.HTTP_201_CREATED)
@@ -262,9 +268,6 @@ class ProviderScheduleView(APIView):
 
         data = request.data.copy()
 
-        # For never-ending recurring schedules, push end_date far into the
-        # future so the availability filter (end_date__gte=query_date) never
-        # cuts them off.
         if (
             data.get("recurrence", "none") != "none"
             and data.get("recurrence_end_type") in (None, "never", "")
@@ -287,8 +290,6 @@ class ProviderScheduleDetailView(APIView):
 
         data = request.data.copy()
 
-        # Same never-ending fix on edit — don't let end_date shrink back
-        # to a past date when the recurrence is still set to "never".
         effective_recurrence = data.get("recurrence", schedule.recurrence)
         effective_end_type = data.get("recurrence_end_type", schedule.recurrence_end_type)
         if (
@@ -395,8 +396,6 @@ class ProviderAvailableSlotsView(APIView):
             elif r in ("weekly", "custom") and dow_abbr in (s.recurrence_days or []):
                 matching.append(s)
 
-        # Build booked ranges as naive local datetimes so they compare
-        # correctly against the naive slot datetimes generated below.
         booked_qs = ProviderAppointment.objects.filter(
             provider=provider,
             start_time__date=query_date,
