@@ -1,8 +1,6 @@
 from rest_framework.exceptions import ValidationError
 from rest_framework.serializers import ModelSerializer
-
 from .models import Identity, HealthcareProviderAccount
-
 IDENTITY_PROTECTED_FIELDS = [
     "is_active",
     "email_verified",
@@ -16,23 +14,19 @@ IDENTITY_PROTECTED_FIELDS = [
     "created_at",
     "deleted_at"
 ]
-
 class IdentitySerializer(ModelSerializer):
     """
     serializer class for the Identity model
     """
-
     class Meta:
         model = Identity
         exclude = ["user_permissions", "groups"]
         read_only_fields = IDENTITY_PROTECTED_FIELDS
-
     def create(self, validated_data):
         password = validated_data.pop("password", None)
         email = validated_data.pop("email", None)
         user = self.Meta.model.objects.create_user(email=email,password=password,**validated_data)
         return user
-
     def to_representation(self, instance):
         representation = super().to_representation(instance)
         representation.pop("password")
@@ -46,10 +40,18 @@ class IdentitySerializer(ModelSerializer):
         representation.pop('date_joined')
         # remove other fields from the get requests here
         return representation
-
     def update(self, instance, validated_data):
+        # Password and email are intentionally excluded from generic
+        # profile updates:
+        # - Password changes must go through the OTP/token-verified
+        #   reset-password flow (ResetPasswordView / confirmResetPasswordView).
+        #   Applying it here via plain setattr() would store it unhashed,
+        #   since the base update() does not call set_password().
+        # - Email is the USERNAME_FIELD / login identifier, so changing it
+        #   needs its own re-verification flow, not a silent profile edit.
+        validated_data.pop("password", None)
+        validated_data.pop("email", None)
         return super().update(instance, validated_data)
-
 class HealthcareProviderAccountSerializer(ModelSerializer):
     '''
     Serializer for the HealthcareProviderAccount model
