@@ -8,13 +8,22 @@ class Migration(migrations.Migration):
     ]
 
     operations = [
-        migrations.AddField(
-            model_name="appointmentcapture",
-            name="form_snapshot",
-            field=models.JSONField(
-                blank=True,
-                default=list,
-                help_text="Snapshot of the form sections at the time of capture, so data remains readable even if the form is later edited or deleted.",
-            ),
+        migrations.SeparateDatabaseAndState(
+            state_operations=[
+                migrations.AddField(
+                    model_name="appointmentcapture",
+                    name="form_snapshot",
+                    field=models.JSONField(blank=True, default=list),
+                ),
+            ],
+            database_operations=[
+                migrations.RunSQL(
+                    sql="""
+ALTER TABLE appointments_appointmentcapture
+    ADD COLUMN IF NOT EXISTS form_snapshot jsonb NOT NULL DEFAULT '[]'::jsonb;
+                    """,
+                    reverse_sql=migrations.RunSQL.noop,
+                ),
+            ],
         ),
     ]
