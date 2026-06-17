@@ -1,5 +1,4 @@
 from django.urls import path
-
 from identity.views import (
     StatusView,
     RegisterView,
@@ -13,11 +12,10 @@ from identity.views import (
     confirmResetPasswordView,
     TokenView,
 )
-
-
 urlpatterns = [
     path("status", StatusView.as_view(), name="status"),
     path("register", RegisterView.as_view(), name="register"),
+    path("register/<str:identity_id>", RegisterView.as_view(), name="register-detail"),
     path("login", LoginView.as_view(), name="login"),
     path("authorise", TokenView.as_view(), name="login"),
     path("otp-send", SendOTPView.as_view()),
