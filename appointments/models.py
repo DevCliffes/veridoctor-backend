@@ -42,6 +42,13 @@ class ProviderAppointment(BaseAppointment, BaseModel):
         on_delete=models.CASCADE,
         related_name="appointments",
     )
+    service = models.ForeignKey(
+        "provider.Service",
+        on_delete=models.SET_NULL,
+        null=True,
+        blank=True,
+        related_name="appointments",
+    )
     appointment_type = models.CharField(
         max_length=20, choices=APPOINTMENT_TYPE_CHOICES, default="virtual"
     )
