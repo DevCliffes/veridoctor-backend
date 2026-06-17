@@ -58,9 +58,14 @@ REST_FRAMEWORK = {
     # or allow read-only access for unauthenticated users.
     "DEFAULT_PERMISSION_CLASSES": [
         # 'rest_framework.permissions.DjangoModelPermissionsOrAnonReadOnly'
+        # NOTE: left empty intentionally for now — switching this to
+        # IsAuthenticated globally will start rejecting requests, and
+        # should only happen once we've confirmed the frontend attaches
+        # the access token as an Authorization header on every request.
+        # See JWTAuthentication below for how it expects the token.
     ],
     "DEFAULT_AUTHENTICATION_CLASSES": [
-        "rest_framework.authentication.TokenAuthentication",
+        "identity.authentication.JWTAuthentication",
     ],
 }
 
