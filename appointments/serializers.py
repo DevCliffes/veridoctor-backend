@@ -37,6 +37,7 @@ class AppointmentCaptureSerializer(serializers.ModelSerializer):
             "appointment",
             "form_id",
             "form_name",
+            "form_snapshot",
             "values",
             "created_at",
             "updated_at",
