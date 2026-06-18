@@ -13,6 +13,33 @@ from .models import AppointmentCapture, ProviderAppointment
 from .serializers import AppointmentCaptureSerializer, ProviderAppointmentSerializer
 
 
+def auto_advance_status(appointment):
+    """
+    Automatically advance appointment status based on time:
+    - Any newly created appointment defaults to 'confirmed' (handled at model level).
+    - If status is 'confirmed' and current time is within the appointment window,
+      advance to 'in-progress'.
+    - If status is 'in-progress' and the appointment end time has passed,
+      advance to 'completed'.
+    This is called on every GET of a single appointment so it stays current
+    without needing a background job.
+    """
+    now = timezone.now()
+    changed = False
+
+    if appointment.status == "confirmed" and appointment.start_time <= now <= appointment.end_time:
+        appointment.status = "in-progress"
+        changed = True
+    elif appointment.status in ("confirmed", "in-progress") and appointment.end_time < now:
+        appointment.status = "completed"
+        changed = True
+
+    if changed:
+        appointment.save(update_fields=["status"])
+
+    return appointment
+
+
 class ProviderAppointmentView(APIView):
     def get(self, request, identity_id):
         try:
@@ -28,7 +55,9 @@ class ProviderAppointmentView(APIView):
         appointment_type = request.query_params.get("appointment_type")
 
         if filter_type == "today":
-            appointments = appointments.filter(start_time__date=now.astimezone(timezone.get_current_timezone()).date())
+            appointments = appointments.filter(
+                start_time__date=now.astimezone(timezone.get_current_timezone()).date()
+            )
             appointments = appointments.order_by("start_time")
         elif filter_type == "upcoming":
             appointments = appointments.filter(start_time__gt=now)
@@ -52,7 +81,9 @@ class ProviderAppointmentView(APIView):
         except (Identity.DoesNotExist, HealthcareProvider.DoesNotExist):
             return Response({"error": "Provider not found"}, status=status.HTTP_404_NOT_FOUND)
 
-        serializer = ProviderAppointmentSerializer(data=request.data)
+        # Force status to confirmed on creation regardless of what was sent
+        data = {**request.data, "status": "confirmed"}
+        serializer = ProviderAppointmentSerializer(data=data)
         if serializer.is_valid():
             patient_identity = find_identity_by_email(request.data.get("patient_email"))
             appointment = serializer.save(provider=provider, patient_identity=patient_identity)
@@ -67,6 +98,10 @@ class ProviderAppointmentDetailView(APIView):
             appointment = ProviderAppointment.objects.get(id=appointment_id)
         except ProviderAppointment.DoesNotExist:
             return Response({"error": "Appointment not found"}, status=status.HTTP_404_NOT_FOUND)
+
+        # Auto-advance status based on current time before returning
+        appointment = auto_advance_status(appointment)
+
         serializer = ProviderAppointmentSerializer(appointment)
         return Response(serializer.data)
 
@@ -75,6 +110,15 @@ class ProviderAppointmentDetailView(APIView):
             appointment = ProviderAppointment.objects.get(id=appointment_id)
         except ProviderAppointment.DoesNotExist:
             return Response({"error": "Appointment not found"}, status=status.HTTP_404_NOT_FOUND)
+
+        # Prevent manually setting confirmed or in-progress — those are automatic
+        incoming_status = request.data.get("status")
+        if incoming_status in ("confirmed", "in-progress"):
+            return Response(
+                {"error": "This status is set automatically and cannot be manually assigned."},
+                status=status.HTTP_400_BAD_REQUEST,
+            )
+
         serializer = ProviderAppointmentSerializer(appointment, data=request.data, partial=True)
         if serializer.is_valid():
             serializer.save()
@@ -107,8 +151,6 @@ class AppointmentCaptureView(APIView):
         except ProviderAppointment.DoesNotExist:
             return Response({"error": "Appointment not found"}, status=status.HTTP_404_NOT_FOUND)
 
-        # Snapshot the form sections at capture time so the data remains
-        # readable even if the form is later edited or deleted.
         from provider.models import Form
         form_snapshot = []
         form_id = request.data.get("form_id")
