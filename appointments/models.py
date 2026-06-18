@@ -10,6 +10,8 @@ class BaseAppointment(models.Model):
         ("scheduled", "Scheduled"),
         ("confirmed", "Confirmed"),
         ("in-progress", "In-progress"),
+        ("completed", "Completed"),
+        ("rescheduled", "Rescheduled"),
         ("cancelled", "Cancelled"),
         ("no-show", "No-show"),
     ]
@@ -20,10 +22,12 @@ class BaseAppointment(models.Model):
     start_time = models.DateTimeField()
     end_time = models.DateTimeField()
     status = models.CharField(
-        max_length=20, choices=STATUS_CHOICES, default="scheduled"
+        max_length=20, choices=STATUS_CHOICES, default="confirmed"
     )
+
     class Meta:
         abstract = True
+
     def clean(self):
         if self.start_time >= self.end_time:
             raise ValidationError("End time must be after start time.")
@@ -62,12 +66,15 @@ class ProviderAppointment(BaseAppointment, BaseModel):
     )
     message = models.TextField(blank=True)
     meet_id = models.CharField(max_length=32, unique=True, blank=True)
+
     class Meta:
         ordering = ["start_time"]
+
     def save(self, *args, **kwargs):
         if not self.meet_id:
             self.meet_id = get_random_string(16)
         super().save(*args, **kwargs)
+
     def __str__(self):
         return f"{self.patient_first_name} {self.patient_last_name} - {self.start_time}"
 
@@ -88,7 +95,9 @@ class AppointmentCapture(BaseModel):
                   "so data remains readable even if the form is later edited or deleted."
     )
     values = models.JSONField(default=dict)
+
     class Meta:
         ordering = ["-created_at"]
+
     def __str__(self):
         return f"Capture for {self.appointment} — {self.form_name}"
