@@ -355,6 +355,44 @@ class ProviderListView(APIView):
         return Response(data)
 
 
+class ProviderPublicProfileView(APIView):
+    """
+    Patient-facing single-provider profile, used by the health portal's
+    detailed doctor profile page. Deliberately excludes phone_number,
+    licence_number, licence_type, and email — those stay scoped to the
+    provider's own ProviderProfileView.
+    """
+    def get(self, request, identity_id):
+        try:
+            identity = Identity.objects.get(id=identity_id)
+            provider = HealthcareProvider.objects.select_related("identity").get(identity=identity)
+        except (Identity.DoesNotExist, HealthcareProvider.DoesNotExist):
+            return Response({"error": "Provider not found"}, status=status.HTTP_404_NOT_FOUND)
+
+        services = list(
+            provider.services.filter(price_visible=True).values(
+                "id", "name", "price", "currency", "estimated_duration", "description"
+            )
+        )
+
+        return Response({
+            "id": str(identity.id),
+            "first_name": identity.first_name,
+            "last_name": identity.last_name,
+            "title": provider.title or "Dr.",
+            "speciality": provider.speciality or "",
+            "clinic_name": provider.clinic_name or "",
+            "address": provider.address or "",
+            "county": provider.county or "",
+            "country": provider.country or "Kenya",
+            "bio": provider.bio or "",
+            "languages": provider.languages or [],
+            "insurances_accepted": provider.insurances_accepted or [],
+            "profile_picture_url": provider.profile_picture_url or "",
+            "services": services,
+        })
+
+
 class ProviderAvailableSlotsView(APIView):
     def get(self, request, identity_id):
         query_date_str = request.query_params.get("date")
