@@ -370,3 +370,107 @@ class RecordAccessGrantDetailView(APIView):
             "status": grant.status,
             "responded_at": grant.responded_at.isoformat(),
         })
+
+class DebugPatientSummaryView(APIView):
+    """
+    TEMPORARY — remove after diagnosing the 500 on ProviderPatientSummaryView.
+    Same logic as ProviderPatientSummaryView.get() but returns the real
+    exception message and traceback as JSON instead of crashing silently.
+
+    GET /records/debug-patient-summary/<appointment_id>
+    """
+    def get(self, request, appointment_id):
+        import traceback
+        try:
+            from appointments.models import ProviderAppointment
+            from provider.models import Prescription
+
+            appointment = ProviderAppointment.objects.select_related(
+                "patient_identity", "provider", "provider__identity"
+            ).get(id=appointment_id)
+
+            patient_identity = appointment.patient_identity
+            if not patient_identity:
+                return Response({"ok": False, "reason": "no patient_identity on appointment"})
+
+            requesting_provider = appointment.provider
+
+            try:
+                from identity.models import patientAccount
+                patient_acct = patientAccount.objects.get(identity=patient_identity)
+                patient_uid = patient_acct.patient_uid
+                date_of_birth = (
+                    patient_acct.date_of_birth.isoformat()
+                    if patient_acct.date_of_birth
+                    else None
+                )
+                blood_type = patient_acct.blood_type
+                allergies = patient_acct.allergies or []
+            except Exception as inner_e:
+                patient_uid = None
+                date_of_birth = None
+                blood_type = None
+                allergies = []
+
+            summaries = PatientProviderRecordSummary.objects.filter(
+                patient_identity=patient_identity
+            ).select_related("provider", "provider__identity")
+
+            total_records = sum(s.record_count for s in summaries)
+            last_dates = [s.last_record_at for s in summaries if s.last_record_at]
+            most_recent = max(last_dates).isoformat() if last_dates else None
+            prior_facilities = summaries.count()
+
+            active_meds = Prescription.objects.filter(
+                patient_identity=patient_identity
+            ).count()
+
+            other_summaries = summaries.exclude(provider=requesting_provider)
+
+            grants = RecordAccessGrant.objects.filter(
+                appointment=appointment,
+                patient_identity=patient_identity,
+            )
+            grants_by_category = {g.requested_category: g for g in grants}
+
+            record_categories = []
+            for s in other_summaries:
+                category_key = s.provider.speciality or s.provider.clinic_name or "General"
+                grant = grants_by_category.get(category_key)
+                record_categories.append({
+                    "speciality": s.provider.speciality or "General Practice",
+                    "facility_name": s.provider.clinic_name or "",
+                    "record_count": s.record_count,
+                    "last_record_at": s.last_record_at.isoformat() if s.last_record_at else None,
+                    "sensitivity": s.sensitivity,
+                    "access_status": grant.status if grant else None,
+                    "grant_id": str(grant.id) if grant else None,
+                })
+
+            approved_grants = [
+                {
+                    "id": str(g.id),
+                    "requested_category": g.requested_category,
+                    "status": g.status,
+                }
+                for g in grants
+                if g.status == "approved"
+            ]
+
+            return Response({
+                "ok": True,
+                "patient_uid": patient_uid,
+                "total_records": total_records,
+                "most_recent": most_recent,
+                "active_meds": active_meds,
+                "prior_facilities": prior_facilities,
+                "record_categories": record_categories,
+                "approved_grants": approved_grants,
+            })
+        except Exception as e:
+            return Response({
+                "ok": False,
+                "error_type": type(e).__name__,
+                "error_message": str(e),
+                "traceback": traceback.format_exc(),
+            }, status=500)
