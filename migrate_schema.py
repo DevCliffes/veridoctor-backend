@@ -1,9 +1,7 @@
 import os
 import django
-
 os.environ.setdefault('DJANGO_SETTINGS_MODULE', 'config.settings')
 django.setup()
-
 from django.db import connection
 
 with connection.cursor() as cursor:
@@ -15,6 +13,17 @@ with connection.cursor() as cursor:
     )
     cursor.execute(
         "UPDATE provider_prescriptiondrug SET drug_name = name WHERE drug_name = '' AND name IS NOT NULL;"
+    )
+
+    # patientAccount missing columns
+    cursor.execute(
+        "ALTER TABLE identity_patientaccount ADD COLUMN IF NOT EXISTS date_of_birth date NULL;"
+    )
+    cursor.execute(
+        "ALTER TABLE identity_patientaccount ADD COLUMN IF NOT EXISTS blood_type varchar(10) NOT NULL DEFAULT 'UNKNOWN';"
+    )
+    cursor.execute(
+        "ALTER TABLE identity_patientaccount ADD COLUMN IF NOT EXISTS allergies jsonb NOT NULL DEFAULT '[]';"
     )
 
 print("Schema updated successfully")
