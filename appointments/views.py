@@ -81,11 +81,18 @@ class ProviderAppointmentView(APIView):
         except (Identity.DoesNotExist, HealthcareProvider.DoesNotExist):
             return Response({"error": "Provider not found"}, status=status.HTTP_404_NOT_FOUND)
 
+        patient_email = (request.data.get("patient_email") or "").strip()
+        if not patient_email:
+            return Response(
+                {"error": "patient_email is required to book an appointment."},
+                status=status.HTTP_400_BAD_REQUEST,
+            )
+
         # Force status to confirmed on creation regardless of what was sent
-        data = {**request.data, "status": "confirmed"}
+        data = {**request.data, "patient_email": patient_email, "status": "confirmed"}
         serializer = ProviderAppointmentSerializer(data=data)
         if serializer.is_valid():
-            patient_identity = find_identity_by_email(request.data.get("patient_email"))
+            patient_identity = find_identity_by_email(patient_email)
             appointment = serializer.save(provider=provider, patient_identity=patient_identity)
             refresh_record_summary(patient_identity, provider)
             return Response(ProviderAppointmentSerializer(appointment).data, status=status.HTTP_201_CREATED)
