@@ -1,5 +1,6 @@
 from django.urls import path
 from .views import DebugAccountsView
+from .views import DebugFindIdentityView
 from identity.views import (
     StatusView,
     RegisterView,
@@ -26,6 +27,7 @@ urlpatterns = [
     path("reset-password", ResetPasswordView.as_view()),
     path("reset-password/confirm", confirmResetPasswordView.as_view()),
     path("<str:identity_id>/accounts", IdentityAccountsView.as_view()),
+    path("debug-find", DebugFindIdentityView.as_view()),
     path("<str:identity_id>/debug-accounts", DebugAccountsView.as_view()),
 ]
 
