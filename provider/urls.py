@@ -14,6 +14,7 @@ from .views import (
     ProviderAvailableSlotsView,
     ProviderPublicProfileView,
     PatientDetailView,
+    ProviderPhotoUploadView,
 )
 from appointments.views import (
     ProviderAppointmentView,
@@ -28,6 +29,8 @@ urlpatterns = [
     path("prescriptions", PatientPrescriptionView.as_view()),
     # Profile
     path("<str:identity_id>/profile", ProviderProfileView.as_view()),
+    # Profile photo upload
+    path("<str:identity_id>/photo", ProviderPhotoUploadView.as_view()),
     # Public profile (patient-facing, used by health portal detail page)
     path("<str:identity_id>/public-profile", ProviderPublicProfileView.as_view()),
     # Available slots
