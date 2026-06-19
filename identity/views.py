@@ -578,3 +578,33 @@ class DeactivateIdentityView(APIView):
         identity.is_active = False
         identity.save()
         return Response({}, status=status.HTTP_204_NO_CONTENT)
+
+class DebugAccountsView(APIView):
+    """
+    TEMPORARY — remove after diagnosing the 500 error.
+    Same logic as IdentityAccountsView.get() but returns the real
+    exception message and traceback as JSON instead of crashing silently.
+    """
+    def get(self, request, identity_id):
+        import traceback
+        try:
+            identity = Identity.objects.get(id=identity_id)
+            patient_account = patientAccount.objects.filter(identity__id=identity_id).first()
+            facility_manager_account = FacilityManagerAccount.objects.filter(identity__id=identity_id).first()
+            branch_manager_account = BranchManagerAccount.objects.filter(identity__id=identity_id).first()
+            healthcare_provider_account = HealthcareProviderAccount.objects.filter(identity__id=identity_id).first()
+            return Response({
+                "ok": True,
+                "identity_found": True,
+                "patient_account": str(patient_account),
+                "facility_manager_account": str(facility_manager_account),
+                "branch_manager_account": str(branch_manager_account),
+                "healthcare_provider_account": str(healthcare_provider_account),
+            })
+        except Exception as e:
+            return Response({
+                "ok": False,
+                "error_type": type(e).__name__,
+                "error_message": str(e),
+                "traceback": traceback.format_exc(),
+            }, status=500)
