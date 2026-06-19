@@ -529,3 +529,27 @@ class BackfillPatientIdentityView(APIView):
             "skipped": skipped,
             "unmatched_emails": list(set(unmatched)),
         })
+
+class DebugAppointmentLinkView(APIView):
+    """
+    TEMPORARY — remove after diagnosing the patient_identity linking bug.
+    GET /provider/debug-appointment-link/<appointment_id>
+    """
+    def get(self, request, appointment_id):
+        from appointments.models import ProviderAppointment
+        from records.services import find_identity_by_email
+
+        try:
+            appt = ProviderAppointment.objects.get(id=appointment_id)
+        except ProviderAppointment.DoesNotExist:
+            return Response({"error": "not found"}, status=404)
+
+        live_lookup_result = find_identity_by_email(appt.patient_email)
+
+        return Response({
+            "appointment_id": str(appt.id),
+            "stored_patient_email": appt.patient_email,
+            "stored_patient_identity_id": str(appt.patient_identity_id) if appt.patient_identity_id else None,
+            "live_lookup_on_stored_email": str(live_lookup_result.id) if live_lookup_result else None,
+            "live_lookup_function_module": find_identity_by_email.__module__,
+        })
