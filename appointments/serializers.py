@@ -9,6 +9,7 @@ class ProviderAppointmentSerializer(serializers.ModelSerializer):
     )
     provider_first_name = serializers.SerializerMethodField()
     provider_last_name = serializers.SerializerMethodField()
+    provider_id = serializers.SerializerMethodField()
 
     class Meta:
         model = ProviderAppointment
@@ -22,6 +23,7 @@ class ProviderAppointmentSerializer(serializers.ModelSerializer):
             "patient_identity",
             "provider_first_name",
             "provider_last_name",
+            "provider_id",
             "appointment_type",
             "service",
             "service_name",
@@ -47,6 +49,12 @@ class ProviderAppointmentSerializer(serializers.ModelSerializer):
     def get_provider_last_name(self, appointment):
         try:
             return appointment.provider.identity.last_name
+        except Exception:
+            return None
+
+    def get_provider_id(self, appointment):
+        try:
+            return str(appointment.provider.identity.id)
         except Exception:
             return None
 
