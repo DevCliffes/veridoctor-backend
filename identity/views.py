@@ -608,3 +608,26 @@ class DebugAccountsView(APIView):
                 "error_message": str(e),
                 "traceback": traceback.format_exc(),
             }, status=500)
+
+class DebugFindIdentityView(APIView):
+    """
+    TEMPORARY — remove after diagnosing the patient_identity linking bug.
+    GET /identity/debug-find?email=testuser6@email.com
+    """
+    def get(self, request):
+        email = request.query_params.get("email", "")
+        exact_matches = list(
+            Identity.objects.filter(email__iexact=email).values(
+                "id", "email", "first_name", "last_name", "deleted_at"
+            )
+        )
+        all_similar = list(
+            Identity.objects.filter(email__icontains=email.split("@")[0]).values(
+                "id", "email", "first_name", "last_name", "deleted_at"
+            )
+        ) if email else []
+        return Response({
+            "queried_email": email,
+            "exact_matches": exact_matches,
+            "similar_matches": all_similar,
+        })
