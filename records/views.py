@@ -41,6 +41,12 @@ class PatientTimelineView(APIView):
     """
     Patient-facing clinical timeline across AppointmentCapture,
     Prescription, and ProviderAppointment.
+
+    Query params:
+      type     — filter by record type: "consultation" or "prescription"
+      provider — filter consultations to a specific provider (identity_id).
+                 Used by the provider app to fetch only their own records
+                 for a patient without needing consent.
     """
     def get(self, request, patient_identity_id):
         try:
@@ -49,6 +55,7 @@ class PatientTimelineView(APIView):
             return Response({"error": "Patient not found"}, status=status.HTTP_404_NOT_FOUND)
 
         record_type = request.query_params.get("type")
+        provider_identity_id = request.query_params.get("provider")
 
         from appointments.models import ProviderAppointment, AppointmentCapture
         from provider.models import Prescription
@@ -61,6 +68,18 @@ class PatientTimelineView(APIView):
             ).exclude(status="cancelled").select_related(
                 "provider", "provider__identity", "service"
             ).prefetch_related("captures").order_by("-start_time")
+
+            # If a provider filter is given, restrict to that provider's records only.
+            # This lets a doctor read their own past records for a patient without
+            # requiring patient consent (they already own those records).
+            if provider_identity_id:
+                try:
+                    provider = HealthcareProvider.objects.get(
+                        identity__id=provider_identity_id
+                    )
+                    appointments = appointments.filter(provider=provider)
+                except HealthcareProvider.DoesNotExist:
+                    appointments = appointments.none()
 
             for appt in appointments:
                 captures = []
