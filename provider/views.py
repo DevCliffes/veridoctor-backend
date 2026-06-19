@@ -497,3 +497,4 @@ class PatientDetailView(APIView):
             "last_name": patient_identity.last_name,
             "email": patient_identity.email,
         })
+
