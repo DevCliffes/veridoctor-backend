@@ -14,6 +14,7 @@ from .views import (
     ProviderAvailableSlotsView,
     ProviderPublicProfileView,
     PatientDetailView,
+    BackfillPatientIdentityView,
 )
 from appointments.views import (
     ProviderAppointmentView,
@@ -26,6 +27,9 @@ urlpatterns = [
     # Provider directory (no identity_id)
     path("list", ProviderListView.as_view()),
     path("prescriptions", PatientPrescriptionView.as_view()),
+
+    # TEMPORARY backfill — remove after hitting once
+    path("backfill-patient-identity", BackfillPatientIdentityView.as_view()),
 
     # Profile
     path("<str:identity_id>/profile", ProviderProfileView.as_view()),
