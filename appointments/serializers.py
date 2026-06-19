@@ -7,6 +7,9 @@ class ProviderAppointmentSerializer(serializers.ModelSerializer):
     service_name = serializers.CharField(
         source="service.name", read_only=True, default=None
     )
+    provider_first_name = serializers.SerializerMethodField()
+    provider_last_name = serializers.SerializerMethodField()
+
     class Meta:
         model = ProviderAppointment
         fields = [
@@ -17,6 +20,8 @@ class ProviderAppointmentSerializer(serializers.ModelSerializer):
             "patient_email",
             "patient_phone_number",
             "patient_identity",
+            "provider_first_name",
+            "provider_last_name",
             "appointment_type",
             "service",
             "service_name",
@@ -29,8 +34,21 @@ class ProviderAppointmentSerializer(serializers.ModelSerializer):
             "updated_at",
         ]
         read_only_fields = ["id", "patient_identity", "meet_id", "created_at", "updated_at"]
+
     def get_patient_name(self, appointment):
         return f"{appointment.patient_first_name} {appointment.patient_last_name}".strip()
+
+    def get_provider_first_name(self, appointment):
+        try:
+            return appointment.provider.identity.first_name
+        except Exception:
+            return None
+
+    def get_provider_last_name(self, appointment):
+        try:
+            return appointment.provider.identity.last_name
+        except Exception:
+            return None
 
 
 class AppointmentCaptureSerializer(serializers.ModelSerializer):
