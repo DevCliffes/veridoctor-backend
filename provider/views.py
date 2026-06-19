@@ -455,3 +455,81 @@ class PatientDetailView(APIView):
             "last_name": patient_identity.last_name,
             "email": patient_identity.email,
         })
+
+
+class ProviderPhotoUploadView(APIView):
+    """
+    Accepts a multipart image upload from the provider profile page,
+    pushes it to Cloudinary, and saves the returned secure URL onto
+    the provider's profile_picture_url field.
+
+    POST /provider/<identity_id>/photo
+    Body: multipart/form-data with a "photo" file field.
+
+    Requires these environment variables to be set on the backend:
+      CLOUDINARY_CLOUD_NAME
+      CLOUDINARY_API_KEY
+      CLOUDINARY_API_SECRET
+    """
+    def post(self, request, identity_id):
+        import os
+        import cloudinary
+        import cloudinary.uploader
+
+        try:
+            identity = Identity.objects.get(id=identity_id)
+            provider = HealthcareProvider.objects.get(identity=identity)
+        except (Identity.DoesNotExist, HealthcareProvider.DoesNotExist):
+            return Response({"error": "Provider not found"}, status=status.HTTP_404_NOT_FOUND)
+
+        photo = request.FILES.get("photo")
+        if not photo:
+            return Response(
+                {"error": "No file provided. Send multipart/form-data with a 'photo' field."},
+                status=status.HTTP_400_BAD_REQUEST,
+            )
+
+        cloud_name = os.environ.get("CLOUDINARY_CLOUD_NAME")
+        api_key = os.environ.get("CLOUDINARY_API_KEY")
+        api_secret = os.environ.get("CLOUDINARY_API_SECRET")
+
+        if not all([cloud_name, api_key, api_secret]):
+            return Response(
+                {"error": "Cloudinary is not configured on the server. "
+                          "Set CLOUDINARY_CLOUD_NAME, CLOUDINARY_API_KEY, "
+                          "CLOUDINARY_API_SECRET environment variables."},
+                status=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            )
+
+        cloudinary.config(
+            cloud_name=cloud_name,
+            api_key=api_key,
+            api_secret=api_secret,
+            secure=True,
+        )
+
+        try:
+            result = cloudinary.uploader.upload(
+                photo,
+                folder="veridoctor/provider_photos",
+                public_id=f"provider_{identity_id}",
+                overwrite=True,
+                resource_type="image",
+            )
+        except Exception as e:
+            return Response(
+                {"error": f"Upload to Cloudinary failed: {str(e)}"},
+                status=status.HTTP_502_BAD_GATEWAY,
+            )
+
+        secure_url = result.get("secure_url")
+        if not secure_url:
+            return Response(
+                {"error": "Cloudinary did not return a URL"},
+                status=status.HTTP_502_BAD_GATEWAY,
+            )
+
+        provider.profile_picture_url = secure_url
+        provider.save(update_fields=["profile_picture_url"])
+
+        return Response({"profile_picture_url": secure_url}, status=status.HTTP_200_OK)
