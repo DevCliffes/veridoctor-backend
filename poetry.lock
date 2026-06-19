@@ -16,6 +16,38 @@ files = [
 tests = ["mypy (>=1.14.0)", "pytest", "pytest-asyncio"]
 
 [[package]]
+name = "certifi"
+version = "2026.6.17"
+description = "Python package for providing Mozilla's CA Bundle."
+optional = false
+python-versions = ">=3.7"
+groups = ["main"]
+files = [
+    {file = "certifi-2026.6.17-py3-none-any.whl", hash = "sha256:2227dcbaafe0d2f59279d1762ddddc37783ed4354594f194ffc31d20f41fc3db"},
+    {file = "certifi-2026.6.17.tar.gz", hash = "sha256:024c88eeec92ca068db80f02b8b07c9cef7b9fe261d1d535abfd5abd6f6af432"},
+]
+
+[[package]]
+name = "cloudinary"
+version = "1.44.2"
+description = "Python and Django SDK for Cloudinary"
+optional = false
+python-versions = "*"
+groups = ["main"]
+files = [
+    {file = "cloudinary-1.44.2-py3-none-any.whl", hash = "sha256:6624d06014c33f50c0c9e740fde1dfe4579d03311025d8bb7183824b7443aa09"},
+    {file = "cloudinary-1.44.2.tar.gz", hash = "sha256:bc9139c68f2ef6996ba62a5d0300e63c711d4f6564644c0c82aa31bf641ef3c7"},
+]
+
+[package.dependencies]
+certifi = "*"
+six = "*"
+urllib3 = ">=1.26.5"
+
+[package.extras]
+dev = ["pytest (==4.6) ; python_version < \"3.7\"", "pytest ; python_version >= \"3.7\"", "tox"]
+
+[[package]]
 name = "django"
 version = "5.2.7"
 description = "A high-level Python web framework that encourages rapid development and clean, pragmatic design."
@@ -245,6 +277,18 @@ docs = ["sphinx", "sphinx-rtd-theme", "zope.interface"]
 tests = ["coverage[toml] (==5.0.4)", "pytest (>=6.0.0,<7.0.0)"]
 
 [[package]]
+name = "six"
+version = "1.17.0"
+description = "Python 2 and 3 compatibility utilities"
+optional = false
+python-versions = "!=3.0.*,!=3.1.*,!=3.2.*,>=2.7"
+groups = ["main"]
+files = [
+    {file = "six-1.17.0-py2.py3-none-any.whl", hash = "sha256:4721f391ed90541fddacab5acf947aa0d3dc7d27b2e1e8eda2be8970586c3274"},
+    {file = "six-1.17.0.tar.gz", hash = "sha256:ff70335d468e7eb6ec65b95b99d3a2836546063f63acc5171de367e834932a81"},
+]
+
+[[package]]
 name = "sqlparse"
 version = "0.5.3"
 description = "A non-validating SQL parser."
@@ -286,6 +330,24 @@ files = [
 ]
 
 [[package]]
+name = "urllib3"
+version = "2.7.0"
+description = "HTTP library with thread-safe connection pooling, file post, and more."
+optional = false
+python-versions = ">=3.10"
+groups = ["main"]
+files = [
+    {file = "urllib3-2.7.0-py3-none-any.whl", hash = "sha256:9fb4c81ebbb1ce9531cce37674bbc6f1360472bc18ca9a553ede278ef7276897"},
+    {file = "urllib3-2.7.0.tar.gz", hash = "sha256:231e0ec3b63ceb14667c67be60f2f2c40a518cb38b03af60abc813da26505f4c"},
+]
+
+[package.extras]
+brotli = ["brotli (>=1.2.0) ; platform_python_implementation == \"CPython\"", "brotlicffi (>=1.2.0.0) ; platform_python_implementation != \"CPython\""]
+h2 = ["h2 (>=4,<5)"]
+socks = ["pysocks (>=1.5.6,!=1.5.7,<2.0)"]
+zstd = ["backports-zstd (>=1.0.0) ; python_version < \"3.14\""]
+
+[[package]]
 name = "whitenoise"
 version = "6.12.0"
 description = "Radically simplified static file serving for WSGI applications"
@@ -303,4 +365,4 @@ brotli = ["brotli"]
 [metadata]
 lock-version = "2.1"
 python-versions = ">=3.12,<4.0"
-content-hash = "8b3b5aab26e59e37c522af6395d69e300a126dd9e4fe9cc8edde9725d8b9c666"
+content-hash = "f4a35ca4a090f30a73311c95ab626122b8992ba26f6128fc57bf298f5b4fa926"
