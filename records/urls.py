@@ -1,4 +1,5 @@
 from django.urls import path
+from .views import DebugPatientSummaryView
 from .views import (
     PatientRecordSummaryView,
     PatientTimelineView,
@@ -17,5 +18,6 @@ urlpatterns = [
     path("appointment/<str:appointment_id>/patient-summary", ProviderPatientSummaryView.as_view()),
     # Access grant flow
     path("access-request", RecordAccessRequestView.as_view()),
+    path("debug-patient-summary/<str:appointment_id>", DebugPatientSummaryView.as_view()),
     path("access-grants/<uuid:grant_id>", RecordAccessGrantDetailView.as_view()),
 ]
