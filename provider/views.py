@@ -186,9 +186,7 @@ class PrescriptionView(APIView):
         try:
             identity = Identity.objects.get(id=identity_id)
             provider, _ = HealthcareProvider.objects.get_or_create(identity=identity)
-
             patient_identity = find_identity_by_email(request.data.get("patient_email"))
-
             prescription = Prescription.objects.create(
                 provider=provider,
                 patient_id=request.data.get("patient_id", ""),
@@ -198,7 +196,6 @@ class PrescriptionView(APIView):
                 diagnosis=request.data.get("diagnosis", ""),
                 notes=request.data.get("notes", ""),
             )
-
             for drug in request.data.get("drugs", []):
                 PrescriptionDrug.objects.create(
                     prescription=prescription,
@@ -208,9 +205,7 @@ class PrescriptionView(APIView):
                     duration=drug.get("duration", ""),
                     instructions=drug.get("instructions", ""),
                 )
-
             refresh_record_summary(patient_identity, provider)
-
             serializer = PrescriptionSerializer(prescription)
             return Response(serializer.data, status=status.HTTP_201_CREATED)
         except Identity.DoesNotExist:
@@ -240,9 +235,7 @@ class PatientPrescriptionView(APIView):
         patient_email = request.query_params.get("patient_email")
         if not patient_email:
             return Response({"error": "patient_email query param required"}, status=status.HTTP_400_BAD_REQUEST)
-        prescriptions = Prescription.objects.filter(
-            patient_email=patient_email
-        ).order_by("-created_at")
+        prescriptions = Prescription.objects.filter(patient_email=patient_email).order_by("-created_at")
         serializer = PrescriptionSerializer(prescriptions, many=True)
         return Response(serializer.data, status=status.HTTP_200_OK)
 
@@ -254,7 +247,6 @@ class ProviderScheduleView(APIView):
             provider = HealthcareProvider.objects.get(identity=identity)
         except (Identity.DoesNotExist, HealthcareProvider.DoesNotExist):
             return Response({"error": "Provider not found"}, status=status.HTTP_404_NOT_FOUND)
-
         schedules = ProviderSchedule.objects.filter(provider=provider).order_by("start_date", "start_time")
         serializer = ProviderScheduleSerializer(schedules, many=True)
         return Response(serializer.data, status=status.HTTP_200_OK)
@@ -265,15 +257,12 @@ class ProviderScheduleView(APIView):
             provider, _ = HealthcareProvider.objects.get_or_create(identity=identity)
         except Identity.DoesNotExist:
             return Response({"error": "Identity not found"}, status=status.HTTP_404_NOT_FOUND)
-
         data = request.data.copy()
-
         if (
             data.get("recurrence", "none") != "none"
             and data.get("recurrence_end_type") in (None, "never", "")
         ):
             data["end_date"] = "2099-12-31"
-
         serializer = ProviderScheduleSerializer(data=data)
         if serializer.is_valid():
             serializer.save(provider=provider)
@@ -287,17 +276,11 @@ class ProviderScheduleDetailView(APIView):
             schedule = ProviderSchedule.objects.get(id=schedule_id)
         except ProviderSchedule.DoesNotExist:
             return Response({"error": "Schedule not found"}, status=status.HTTP_404_NOT_FOUND)
-
         data = request.data.copy()
-
         effective_recurrence = data.get("recurrence", schedule.recurrence)
         effective_end_type = data.get("recurrence_end_type", schedule.recurrence_end_type)
-        if (
-            effective_recurrence != "none"
-            and effective_end_type in (None, "never", "")
-        ):
+        if effective_recurrence != "none" and effective_end_type in (None, "never", ""):
             data["end_date"] = "2099-12-31"
-
         serializer = ProviderScheduleSerializer(schedule, data=data, partial=True)
         if serializer.is_valid():
             serializer.save()
@@ -309,21 +292,15 @@ class ProviderScheduleDetailView(APIView):
             schedule = ProviderSchedule.objects.get(id=schedule_id)
         except ProviderSchedule.DoesNotExist:
             return Response({"error": "Schedule not found"}, status=status.HTTP_404_NOT_FOUND)
-
         occurrence_date = request.query_params.get("occurrence_date")
         delete_series = request.query_params.get("delete_series") == "true"
-
         if schedule.recurrence != "none" and occurrence_date and not delete_series:
             excluded = schedule.excluded_dates or []
             if occurrence_date not in excluded:
                 excluded.append(occurrence_date)
             schedule.excluded_dates = excluded
             schedule.save(update_fields=["excluded_dates"])
-            return Response(
-                ProviderScheduleSerializer(schedule).data,
-                status=status.HTTP_200_OK,
-            )
-
+            return Response(ProviderScheduleSerializer(schedule).data, status=status.HTTP_200_OK)
         schedule.delete()
         return Response(status=status.HTTP_204_NO_CONTENT)
 
@@ -334,7 +311,6 @@ class ProviderListView(APIView):
         providers = HealthcareProvider.objects.select_related("identity").prefetch_related("services")
         if speciality:
             providers = providers.filter(speciality__icontains=speciality)
-
         data = []
         for p in providers:
             services = list(p.services.filter(price_visible=True).values(
@@ -356,25 +332,17 @@ class ProviderListView(APIView):
 
 
 class ProviderPublicProfileView(APIView):
-    """
-    Patient-facing single-provider profile, used by the health portal's
-    detailed doctor profile page. Deliberately excludes phone_number,
-    licence_number, licence_type, and email — those stay scoped to the
-    provider's own ProviderProfileView.
-    """
     def get(self, request, identity_id):
         try:
             identity = Identity.objects.get(id=identity_id)
             provider = HealthcareProvider.objects.select_related("identity").get(identity=identity)
         except (Identity.DoesNotExist, HealthcareProvider.DoesNotExist):
             return Response({"error": "Provider not found"}, status=status.HTTP_404_NOT_FOUND)
-
         services = list(
             provider.services.filter(price_visible=True).values(
                 "id", "name", "price", "currency", "estimated_duration", "description"
             )
         )
-
         return Response({
             "id": str(identity.id),
             "first_name": identity.first_name,
@@ -398,12 +366,10 @@ class ProviderAvailableSlotsView(APIView):
         query_date_str = request.query_params.get("date")
         if not query_date_str:
             return Response({"error": "date param required (YYYY-MM-DD)"}, status=400)
-
         try:
             query_date = date.fromisoformat(query_date_str)
         except ValueError:
             return Response({"error": "Invalid date format"}, status=400)
-
         try:
             identity = Identity.objects.get(id=identity_id)
             provider = HealthcareProvider.objects.get(identity=identity)
@@ -478,78 +444,14 @@ class ProviderAvailableSlotsView(APIView):
 
 
 class PatientDetailView(APIView):
-    """
-    Provider-facing patient profile lookup.
-    Used by the capture page to resolve phone_number when it is missing
-    from the appointment row but the patient has a linked Identity account.
-
-    GET /provider/<identity_id>/patients/<patient_identity_id>/
-    """
     def get(self, request, identity_id, patient_identity_id):
         try:
             patient_identity = Identity.objects.get(id=patient_identity_id)
         except Identity.DoesNotExist:
             return Response({"error": "Patient not found"}, status=status.HTTP_404_NOT_FOUND)
-
         return Response({
             "phone_number": patient_identity.phone_number or "",
             "first_name": patient_identity.first_name,
             "last_name": patient_identity.last_name,
             "email": patient_identity.email,
-        })
-
-
-class BackfillPatientIdentityView(APIView):
-    """
-    TEMPORARY — remove after running once.
-    Links existing appointments to their Identity records by matching patient_email.
-
-    GET https://veridoctor-backend-1.onrender.com/provider/backfill-patient-identity
-    """
-    def get(self, request):
-        linked = 0
-        skipped = 0
-        unmatched = []
-
-        for appt in ProviderAppointment.objects.filter(patient_identity__isnull=True):
-            if not appt.patient_email:
-                skipped += 1
-                continue
-            try:
-                identity = Identity.objects.get(email=appt.patient_email)
-                appt.patient_identity = identity
-                appt.save(update_fields=["patient_identity"])
-                linked += 1
-            except Identity.DoesNotExist:
-                unmatched.append(appt.patient_email)
-                skipped += 1
-
-        return Response({
-            "linked": linked,
-            "skipped": skipped,
-            "unmatched_emails": list(set(unmatched)),
-        })
-
-class DebugAppointmentLinkView(APIView):
-    """
-    TEMPORARY — remove after diagnosing the patient_identity linking bug.
-    GET /provider/debug-appointment-link/<appointment_id>
-    """
-    def get(self, request, appointment_id):
-        from appointments.models import ProviderAppointment
-        from records.services import find_identity_by_email
-
-        try:
-            appt = ProviderAppointment.objects.get(id=appointment_id)
-        except ProviderAppointment.DoesNotExist:
-            return Response({"error": "not found"}, status=404)
-
-        live_lookup_result = find_identity_by_email(appt.patient_email)
-
-        return Response({
-            "appointment_id": str(appt.id),
-            "stored_patient_email": appt.patient_email,
-            "stored_patient_identity_id": str(appt.patient_identity_id) if appt.patient_identity_id else None,
-            "live_lookup_on_stored_email": str(live_lookup_result.id) if live_lookup_result else None,
-            "live_lookup_function_module": find_identity_by_email.__module__,
         })
