@@ -475,3 +475,25 @@ class ProviderAvailableSlotsView(APIView):
                 cursor += timedelta(minutes=duration)
 
         return Response(slots)
+
+
+class PatientDetailView(APIView):
+    """
+    Provider-facing patient profile lookup.
+    Used by the capture page to resolve phone_number when it is missing
+    from the appointment row but the patient has a linked Identity account.
+
+    GET /provider/<identity_id>/patients/<patient_identity_id>/
+    """
+    def get(self, request, identity_id, patient_identity_id):
+        try:
+            patient_identity = Identity.objects.get(id=patient_identity_id)
+        except Identity.DoesNotExist:
+            return Response({"error": "Patient not found"}, status=status.HTTP_404_NOT_FOUND)
+
+        return Response({
+            "phone_number": patient_identity.phone_number or "",
+            "first_name": patient_identity.first_name,
+            "last_name": patient_identity.last_name,
+            "email": patient_identity.email,
+        })
