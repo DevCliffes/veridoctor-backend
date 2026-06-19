@@ -1,4 +1,5 @@
 from django.urls import path
+from .views import DebugAppointmentLinkView
 from .views import (
     ProviderProfileView,
     ServiceView,
@@ -68,4 +69,10 @@ urlpatterns = [
 
     # Patient profile lookup (used by capture page to resolve phone number)
     path("<str:identity_id>/patients/<str:patient_identity_id>", PatientDetailView.as_view()),
+    path("debug-appointment-link/<str:appointment_id>", DebugAppointmentLinkView.as_view()),
 ]
+
+
+# add this path:
+
+from .views import DebugAppointmentLinkView
