@@ -498,3 +498,34 @@ class PatientDetailView(APIView):
             "email": patient_identity.email,
         })
 
+
+class BackfillPatientIdentityView(APIView):
+    """
+    TEMPORARY — remove after running once.
+    Links existing appointments to their Identity records by matching patient_email.
+
+    GET https://veridoctor-backend-1.onrender.com/provider/backfill-patient-identity
+    """
+    def get(self, request):
+        linked = 0
+        skipped = 0
+        unmatched = []
+
+        for appt in ProviderAppointment.objects.filter(patient_identity__isnull=True):
+            if not appt.patient_email:
+                skipped += 1
+                continue
+            try:
+                identity = Identity.objects.get(email=appt.patient_email)
+                appt.patient_identity = identity
+                appt.save(update_fields=["patient_identity"])
+                linked += 1
+            except Identity.DoesNotExist:
+                unmatched.append(appt.patient_email)
+                skipped += 1
+
+        return Response({
+            "linked": linked,
+            "skipped": skipped,
+            "unmatched_emails": list(set(unmatched)),
+        })
