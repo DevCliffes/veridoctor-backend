@@ -71,6 +71,7 @@ class RegisterView(APIView):
         if not request.data:
             return Response({"error": "bad request"}, status=status.HTTP_400_BAD_REQUEST)
         otp = generate_code(length=6, uppercase_only=True)
+        print(f"DEBUG OTP for {request.data.get('email')}: {otp}", flush=True)
         message = f"Your email address was used to create an account with veridoctor, use the code {otp} to verify your email address and complete account creation. This code will be valid for the next 10 minutes"
         serializer = IdentitySerializer(data=request.data)
         if serializer.is_valid():
@@ -117,7 +118,6 @@ class RegisterView(APIView):
         identity.deleted_at = timezone.now()
         identity.save()
         return Response({}, status=status.HTTP_204_NO_CONTENT)
-
 
 class LoginView(APIView):
     def post(self, request):
