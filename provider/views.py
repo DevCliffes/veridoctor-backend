@@ -26,9 +26,10 @@ class ProviderProfileView(APIView):
     def get(self, request, identity_id):
         try:
             identity = Identity.objects.get(id=identity_id)
-            provider = HealthcareProvider.objects.get(identity=identity)
-        except (Identity.DoesNotExist, HealthcareProvider.DoesNotExist):
-            return Response({"error": "Provider not found"}, status=status.HTTP_404_NOT_FOUND)
+        except Identity.DoesNotExist:
+            return Response({"error": "Identity not found"}, status=status.HTTP_404_NOT_FOUND)
+
+        provider, _ = HealthcareProvider.objects.get_or_create(identity=identity)
 
         return Response({
             "first_name": identity.first_name,
@@ -36,7 +37,7 @@ class ProviderProfileView(APIView):
             "email": identity.email,
             "title": provider.title or "Dr.",
             "speciality": provider.speciality or "",
-            "phone_number": provider.phone_number or "",
+            "phone_number": provider.phone_number or identity.phone_number or "",
             "licence_number": provider.licence_number or "",
             "licence_type": provider.licence_type or "",
             "clinic_name": provider.clinic_name or "",
@@ -52,9 +53,10 @@ class ProviderProfileView(APIView):
     def patch(self, request, identity_id):
         try:
             identity = Identity.objects.get(id=identity_id)
-            provider = HealthcareProvider.objects.get(identity=identity)
-        except (Identity.DoesNotExist, HealthcareProvider.DoesNotExist):
-            return Response({"error": "Provider not found"}, status=status.HTTP_404_NOT_FOUND)
+        except Identity.DoesNotExist:
+            return Response({"error": "Identity not found"}, status=status.HTTP_404_NOT_FOUND)
+
+        provider, _ = HealthcareProvider.objects.get_or_create(identity=identity)
 
         for field in ["first_name", "last_name"]:
             if field in request.data:
