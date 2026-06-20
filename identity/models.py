@@ -65,9 +65,9 @@ class ProviderQualificationsModel(BaseModel):
 class HealthcareProviderAccount(BaseModel):
     """A healthcare provider account"""
     identity = models.OneToOneField("identity.Identity", on_delete=models.CASCADE)
-    licence_number = models.CharField(max_length=255, unique=True)
-    licence_type = models.CharField(max_length=255)
-    practice_type = models.CharField(max_length=255)
+    licence_number = models.CharField(max_length=255, unique=True, null=True, blank=True)
+    licence_type = models.CharField(max_length=255, blank=True, default="")
+    practice_type = models.CharField(max_length=255, blank=True, default="")
     speciality = models.CharField(max_length=255, null=True, blank=True)
     sub_speciality = models.CharField(max_length=255, null=True, blank=True)
     qualifications = models.ManyToManyField(
