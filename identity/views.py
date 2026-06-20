@@ -322,29 +322,36 @@ class IdentityAccountsView(APIView):
             return Response({"detail": "account created"}, status=status.HTTP_201_CREATED)
         elif account_type == "healthcare_provider":
             if hasattr(identity, "healthcareprovideraccount"):
-                return Response({"error": "healthcare provider account already exists for this identity"}, status=status.HTTP_400_BAD_REQUEST)
+                return Response(
+                    {"error": "healthcare provider account already exists for this identity"},
+                    status=status.HTTP_400_BAD_REQUEST,
+                )
             phone_number = request.data.get("phone_number")
             if phone_number:
                 identity.phone_number = phone_number
                 identity.save()
-            provider_account = HealthcareProviderAccount.objects.create(identity=identity)
-            provider_account.save()
-            serializer = HealthcareProviderAccountSerializer(provider_account, data=request.data, partial=True)
+
+            provider_payload = request.data.copy()
+            provider_payload.pop("phone_number", None)
+            provider_payload.pop("account_type", None)
+
+            serializer = HealthcareProviderAccountSerializer(data=provider_payload)
             if serializer.is_valid():
-                serializer.save()
-            return Response({"detail": "account created"}, status=status.HTTP_201_CREATED)
+                serializer.save(identity=identity)
+                return Response({"detail": "account created"}, status=status.HTTP_201_CREATED)
+            return Response(serializer.errors, status=status.HTTP_400_BAD_REQUEST)
         elif account_type == "facility_manager":
-            facility_account = FacilityManagerAccount.objects.create()
-            facility_account.save()
             if hasattr(identity, "facilitymanageraccount"):
-                return Response({"detail": "account created"}, status=status.HTTP_201_CREATED)
-            return Response({"error": "account type not yet implemented"}, status=status.HTTP_501_NOT_IMPLEMENTED)
+                return Response({"error": "facility manager account already exists for this identity"}, status=status.HTTP_400_BAD_REQUEST)
+            facility_account = FacilityManagerAccount.objects.create(identity=identity)
+            facility_account.save()
+            return Response({"detail": "account created"}, status=status.HTTP_201_CREATED)
         elif account_type == "workstation_account":
-            workstation_account = WorkStationAccount.objects.create()
-            workstation_account.save()
             if hasattr(identity, "workstationaccount"):
-                return Response({"detail": "account created"}, status=status.HTTP_201_CREATED)
-            return Response({"error": "account type not yet implemented"}, status=status.HTTP_501_NOT_IMPLEMENTED)
+                return Response({"error": "workstation account already exists for this identity"}, status=status.HTTP_400_BAD_REQUEST)
+            workstation_account = WorkStationAccount.objects.create(veri_identifier=identity)
+            workstation_account.save()
+            return Response({"detail": "account created"}, status=status.HTTP_201_CREATED)
         else:
             return Response({"error": "account type not yet implemented"}, status=status.HTTP_501_NOT_IMPLEMENTED)
 
