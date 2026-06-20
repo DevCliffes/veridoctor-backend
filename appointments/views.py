@@ -8,6 +8,7 @@ from rest_framework.views import APIView
 from datetime import timedelta
 
 from records.services import find_identity_by_email, refresh_record_summary
+from notifications.services import notify
 
 from .models import AppointmentCapture, ProviderAppointment
 from .serializers import AppointmentCaptureSerializer, ProviderAppointmentSerializer
@@ -38,6 +39,18 @@ def auto_advance_status(appointment):
         appointment.save(update_fields=["status"])
 
     return appointment
+
+
+def _patient_display_name(appointment):
+    name = f"{appointment.patient_first_name} {appointment.patient_last_name}".strip()
+    return name or "A patient"
+
+
+def _provider_display_name(provider):
+    try:
+        return f"Dr. {provider.identity.first_name} {provider.identity.last_name}".strip()
+    except Exception:
+        return "Your provider"
 
 
 class ProviderAppointmentView(APIView):
@@ -95,6 +108,18 @@ class ProviderAppointmentView(APIView):
             patient_identity = find_identity_by_email(patient_email)
             appointment = serializer.save(provider=provider, patient_identity=patient_identity)
             refresh_record_summary(patient_identity, provider)
+
+            # Notify the patient, if they have a linked account. Booking can
+            # happen with just an email (no account yet), so this is None-safe.
+            notify(
+                recipient_identity=patient_identity,
+                notification_type="appointment_booked",
+                title="Appointment confirmed",
+                message=f"Your appointment with {_provider_display_name(provider)} "
+                        f"is confirmed for {appointment.start_time.strftime('%b %d, %Y at %H:%M')}.",
+                link=f"/appointments/{appointment.id}",
+            )
+
             return Response(ProviderAppointmentSerializer(appointment).data, status=status.HTTP_201_CREATED)
         return Response(serializer.errors, status=status.HTTP_400_BAD_REQUEST)
 
@@ -126,9 +151,45 @@ class ProviderAppointmentDetailView(APIView):
                 status=status.HTTP_400_BAD_REQUEST,
             )
 
+        # Determine what's actually changing before saving, so we know which
+        # notification (if any) to send — and so the "rescheduled" message
+        # can mention the new time, and "cancelled" doesn't also fire as if
+        # it were a reschedule.
+        is_being_cancelled = incoming_status == "cancelled" and appointment.status != "cancelled"
+        is_being_rescheduled = (
+            not is_being_cancelled
+            and ("start_time" in request.data or "end_time" in request.data)
+        )
+
         serializer = ProviderAppointmentSerializer(appointment, data=request.data, partial=True)
         if serializer.is_valid():
-            serializer.save()
+            updated_appointment = serializer.save()
+
+            # This PATCH is provider-initiated (it's under the provider/<id>/
+            # appointments/<id> route), so the notification goes to the patient.
+            if is_being_cancelled and updated_appointment.patient_identity:
+                notify(
+                    recipient_identity=updated_appointment.patient_identity,
+                    notification_type="appointment_cancelled",
+                    title="Appointment cancelled",
+                    message=f"Your appointment with "
+                            f"{_provider_display_name(updated_appointment.provider)} "
+                            f"on {updated_appointment.start_time.strftime('%b %d, %Y at %H:%M')} "
+                            f"has been cancelled.",
+                    link=f"/appointments/{updated_appointment.id}",
+                )
+            elif is_being_rescheduled and updated_appointment.patient_identity:
+                notify(
+                    recipient_identity=updated_appointment.patient_identity,
+                    notification_type="appointment_rescheduled",
+                    title="Appointment rescheduled",
+                    message=f"Your appointment with "
+                            f"{_provider_display_name(updated_appointment.provider)} "
+                            f"has been moved to "
+                            f"{updated_appointment.start_time.strftime('%b %d, %Y at %H:%M')}.",
+                    link=f"/appointments/{updated_appointment.id}",
+                )
+
             return Response(serializer.data)
         return Response(serializer.errors, status=status.HTTP_400_BAD_REQUEST)
 
@@ -283,5 +344,24 @@ class PatientAppointmentView(APIView):
 
         appointment.status = "cancelled"
         appointment.save()
+
+        # This PATCH is patient-initiated, so the notification goes to the
+        # provider. provider.identity is reached via the existing FK — no
+        # new query needed.
+        try:
+            provider_identity = appointment.provider.identity
+        except Exception:
+            provider_identity = None
+
+        notify(
+            recipient_identity=provider_identity,
+            notification_type="appointment_cancelled",
+            title="Appointment cancelled",
+            message=f"{_patient_display_name(appointment)} cancelled their "
+                    f"appointment scheduled for "
+                    f"{appointment.start_time.strftime('%b %d, %Y at %H:%M')}.",
+            link=f"/appointments/{appointment.id}",
+        )
+
         serializer = ProviderAppointmentSerializer(appointment)
         return Response(serializer.data)
