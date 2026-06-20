@@ -326,6 +326,7 @@ class ProviderListView(APIView):
                 "bio": p.bio or "",
                 "languages": p.languages or [],
                 "insurances_accepted": p.insurances_accepted or [],
+                "profile_picture_url": p.profile_picture_url or "",
                 "services": services,
             })
         return Response(data)
@@ -534,8 +535,14 @@ class ProviderPhotoUploadView(APIView):
 
         return Response({"profile_picture_url": secure_url}, status=status.HTTP_200_OK)
 
+
 class ProviderPhotoView(APIView):
     """
+    DEAD CODE — unreachable. ProviderPhotoUploadView is registered first
+    in urls.py for the same path ("<str:identity_id>/photo"), so Django
+    always matches that one. Kept here only because removing it isn't
+    required for correctness; safe to delete in a future cleanup pass.
+
     Handles profile photo upload for a provider.
     POST /provider/<identity_id>/photo
     Accepts multipart/form-data with a 'photo' field.
@@ -554,7 +561,6 @@ class ProviderPhotoView(APIView):
         if not photo:
             return Response({"error": "No photo file provided"}, status=status.HTTP_400_BAD_REQUEST)
 
-        # Validate file type
         allowed_types = ["image/jpeg", "image/png", "image/webp", "image/gif"]
         if photo.content_type not in allowed_types:
             return Response(
@@ -562,14 +568,12 @@ class ProviderPhotoView(APIView):
                 status=status.HTTP_400_BAD_REQUEST,
             )
 
-        # Validate file size (5MB max)
         if photo.size > 5 * 1024 * 1024:
             return Response(
                 {"error": "File too large. Maximum size is 5MB."},
                 status=status.HTTP_400_BAD_REQUEST,
             )
 
-        # Convert to base64 data URL and store on the profile
         photo_data = base64.b64encode(photo.read()).decode("utf-8")
         data_url = f"data:{photo.content_type};base64,{photo_data}"
 
