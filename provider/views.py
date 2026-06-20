@@ -533,3 +533,50 @@ class ProviderPhotoUploadView(APIView):
         provider.save(update_fields=["profile_picture_url"])
 
         return Response({"profile_picture_url": secure_url}, status=status.HTTP_200_OK)
+
+class ProviderPhotoView(APIView):
+    """
+    Handles profile photo upload for a provider.
+    POST /provider/<identity_id>/photo
+    Accepts multipart/form-data with a 'photo' field.
+    Stores the image as base64 data URL (no external storage needed).
+    """
+    def post(self, request, identity_id):
+        import base64
+
+        try:
+            identity = Identity.objects.get(id=identity_id)
+            provider = HealthcareProvider.objects.get(identity=identity)
+        except (Identity.DoesNotExist, HealthcareProvider.DoesNotExist):
+            return Response({"error": "Provider not found"}, status=status.HTTP_404_NOT_FOUND)
+
+        photo = request.FILES.get("photo")
+        if not photo:
+            return Response({"error": "No photo file provided"}, status=status.HTTP_400_BAD_REQUEST)
+
+        # Validate file type
+        allowed_types = ["image/jpeg", "image/png", "image/webp", "image/gif"]
+        if photo.content_type not in allowed_types:
+            return Response(
+                {"error": "Invalid file type. Use JPEG, PNG, WebP, or GIF."},
+                status=status.HTTP_400_BAD_REQUEST,
+            )
+
+        # Validate file size (5MB max)
+        if photo.size > 5 * 1024 * 1024:
+            return Response(
+                {"error": "File too large. Maximum size is 5MB."},
+                status=status.HTTP_400_BAD_REQUEST,
+            )
+
+        # Convert to base64 data URL and store on the profile
+        photo_data = base64.b64encode(photo.read()).decode("utf-8")
+        data_url = f"data:{photo.content_type};base64,{photo_data}"
+
+        provider.profile_picture_url = data_url
+        provider.save(update_fields=["profile_picture_url"])
+
+        return Response(
+            {"profile_picture_url": data_url},
+            status=status.HTTP_200_OK,
+        )
