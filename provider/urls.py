@@ -1,4 +1,5 @@
 from django.urls import path
+from .views import ProviderPhotoView 
 from .views import (
     ProviderProfileView,
     ServiceView,
@@ -56,4 +57,5 @@ urlpatterns = [
     path("<str:identity_id>/prescriptions/<str:prescription_id>", PrescriptionDetailView.as_view()),
     # Patient profile lookup (used by capture page to resolve phone number)
     path("<str:identity_id>/patients/<str:patient_identity_id>", PatientDetailView.as_view()),
+    path("<str:identity_id>/photo", ProviderPhotoView.as_view()), 
 ]
