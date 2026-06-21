@@ -2,6 +2,7 @@ import os
 import django
 os.environ.setdefault('DJANGO_SETTINGS_MODULE', 'config.settings')
 django.setup()
+
 from django.db import connection
 
 with connection.cursor() as cursor:
@@ -14,6 +15,7 @@ with connection.cursor() as cursor:
     cursor.execute(
         "UPDATE provider_prescriptiondrug SET drug_name = name WHERE drug_name = '' AND name IS NOT NULL;"
     )
+
     # patientAccount missing columns
     cursor.execute(
         "ALTER TABLE identity_patientaccount ADD COLUMN IF NOT EXISTS date_of_birth date NULL;"
@@ -24,6 +26,7 @@ with connection.cursor() as cursor:
     cursor.execute(
         "ALTER TABLE identity_patientaccount ADD COLUMN IF NOT EXISTS allergies jsonb NOT NULL DEFAULT '[]';"
     )
+
     # healthcare provider account fixes — licence_number must allow NULL
     # so multiple providers without a licence on file don't collide on
     # a shared unique='' value, which was causing 500s on every signup
@@ -36,9 +39,9 @@ with connection.cursor() as cursor:
     )
 
     # ── notifications_notification table ────────────────────────────────
-    # The `notifications` app's model was never given a real Django
+    # The notifications app's model was never given a real Django
     # migration file (no local shell access to run makemigrations), so
-    # `manage.py migrate` in startup.sh has nothing to apply for it and
+    # manage.py migrate in startup.sh has nothing to apply for it and
     # the table was never created — every request to /notifications/
     # was 500-ing on a missing table. Created here directly, matching
     # exactly what Django would have generated from the model:
@@ -78,6 +81,16 @@ with connection.cursor() as cursor:
         CREATE INDEX IF NOT EXISTS notifications_notification_created_at_idx
         ON notifications_notification (created_at);
         """
+    )
+
+    # ── provider_service.price must allow NULL ───────────────────────────
+    # Providers can leave price blank when it's negotiable instead of
+    # fixed (frontend now sends null for an empty price field). The
+    # column was created NOT NULL by the original migration, so without
+    # this the insert/update fails at the database level even though the
+    # Django model and frontend already treat it as optional.
+    cursor.execute(
+        "ALTER TABLE provider_service ALTER COLUMN price DROP NOT NULL;"
     )
 
 print("Schema updated successfully")
