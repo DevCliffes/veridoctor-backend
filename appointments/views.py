@@ -379,25 +379,21 @@ class ProviderDashboardStatsView(APIView):
             start_time__date=today,
         ).count()
 
-        # ── This week (Mon → today) ──────────────────────────────────────────
-        week_start = today - timedelta(days=today.weekday())  # Monday
+        # ── This week (Mon → Sun of current ISO week) ───────────────────────
+        week_start = today - timedelta(days=today.weekday())   # Monday
+        week_end = week_start + timedelta(days=6)              # Sunday
         this_week_appointments = ProviderAppointment.objects.filter(
             provider=provider,
             start_time__date__gte=week_start,
-            start_time__date__lte=today,
+            start_time__date__lte=week_end,
         ).count()
 
-        # ── Total unique patients this calendar month ────────────────────────
+        # ── Total patients this calendar month (every appointment counts) ────
         month_start = today.replace(day=1)
-        total_patients_month = (
-            ProviderAppointment.objects.filter(
-                provider=provider,
-                start_time__date__gte=month_start,
-            )
-            .values("patient_email")
-            .distinct()
-            .count()
-        )
+        total_patients_month = ProviderAppointment.objects.filter(
+            provider=provider,
+            start_time__date__gte=month_start,
+        ).count()
 
         # ── Average consultation duration (completed only) ───────────────────
         completed_qs = ProviderAppointment.objects.filter(
