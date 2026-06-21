@@ -1,5 +1,6 @@
 from django.utils import timezone
-from django.db.models import Avg, F, ExpressionWrapper, DurationField
+from django.db.models import Avg, F, ExpressionWrapper, DurationField, Count
+from datetime import timedelta
 from identity.models import Identity
 from provider.models import HealthcareProvider
 from rest_framework import status
@@ -11,10 +12,6 @@ from records.services import find_identity_by_email, refresh_record_summary
 
 
 def _notify(recipient_identity, notification_type, title, message="", link=""):
-    """
-    Helper to create a notification. Wrapped in try/except so a notification
-    failure never breaks the main request — notifications are best-effort.
-    """
     try:
         from notifications.models import Notification
         Notification.objects.create(
@@ -29,13 +26,6 @@ def _notify(recipient_identity, notification_type, title, message="", link=""):
 
 
 class PatientAppointmentView(APIView):
-    """
-    Patient-facing appointment list and booking.
-    GET  /appointments?patient_email=<email>&filter=<upcoming|today|past>
-    POST /appointments  { ...booking fields... }
-    PATCH /appointments/<appointment_id>  { status, start_time, end_time }
-    """
-
     def get(self, request):
         patient_email = request.query_params.get("patient_email")
         filter_type = request.query_params.get("filter", "upcoming")
@@ -55,7 +45,7 @@ class PatientAppointmentView(APIView):
             qs = qs.filter(start_time__date=now.date())
         elif filter_type == "past":
             qs = qs.filter(end_time__lt=now)
-        else:  # upcoming (default)
+        else:
             qs = qs.filter(start_time__gte=now).exclude(
                 status__in=["cancelled", "no-show"]
             )
@@ -94,14 +84,12 @@ class PatientAppointmentView(APIView):
 
         appointment = serializer.save()
 
-        # Link to patient identity if their email matches a registered account
         patient_identity = find_identity_by_email(appointment.patient_email)
         if patient_identity:
             appointment.patient_identity = patient_identity
             appointment.save(update_fields=["patient_identity"])
             refresh_record_summary(patient_identity, appointment.provider)
 
-        # Notify the provider that a new appointment was booked
         if appointment.provider and appointment.provider.identity:
             provider_identity = appointment.provider.identity
             patient_name = f"{appointment.patient_first_name} {appointment.patient_last_name}".strip()
@@ -114,7 +102,6 @@ class PatientAppointmentView(APIView):
                 link=f"/appointments/{appointment.id}",
             )
 
-        # Notify the patient that their booking was received (if they have an account)
         if patient_identity:
             provider_name = ""
             if appointment.provider and appointment.provider.identity:
@@ -158,7 +145,6 @@ class PatientAppointmentView(APIView):
             pi = updated.provider.identity
             provider_name = f"Dr. {pi.first_name} {pi.last_name}"
 
-        # Notify patient when status changes
         if patient_identity and new_status != old_status:
             if new_status == "confirmed":
                 _notify(
@@ -189,12 +175,6 @@ class PatientAppointmentView(APIView):
 
 
 class ProviderAppointmentView(APIView):
-    """
-    Provider-facing appointment list and creation.
-    GET  /provider/<identity_id>/appointments?filter=<upcoming|today|past>
-    POST /provider/<identity_id>/appointments
-    """
-
     def get(self, request, identity_id):
         filter_type = request.query_params.get("filter", "upcoming")
         now = timezone.now()
@@ -214,7 +194,7 @@ class ProviderAppointmentView(APIView):
             qs = qs.filter(end_time__lt=now)
         elif filter_type == "all":
             pass
-        else:  # upcoming
+        else:
             qs = qs.filter(start_time__gte=now).exclude(
                 status__in=["cancelled", "no-show"]
             )
@@ -237,14 +217,12 @@ class ProviderAppointmentView(APIView):
 
         appointment = serializer.save(provider=provider)
 
-        # Link patient identity
         patient_identity = find_identity_by_email(appointment.patient_email)
         if patient_identity:
             appointment.patient_identity = patient_identity
             appointment.save(update_fields=["patient_identity"])
             refresh_record_summary(patient_identity, provider)
 
-            # Notify patient that the provider created an appointment for them
             provider_name = f"Dr. {provider.identity.first_name} {provider.identity.last_name}"
             _notify(
                 recipient_identity=patient_identity,
@@ -262,10 +240,6 @@ class ProviderAppointmentView(APIView):
 
 
 class ProviderAppointmentDetailView(APIView):
-    """
-    GET/PATCH/DELETE /provider/<identity_id>/appointments/<appointment_id>
-    """
-
     def get(self, request, identity_id, appointment_id):
         try:
             appointment = ProviderAppointment.objects.select_related(
@@ -300,7 +274,6 @@ class ProviderAppointmentDetailView(APIView):
             pi = updated.provider.identity
             provider_name = f"Dr. {pi.first_name} {pi.last_name}"
 
-        # Notify patient on status change
         if patient_identity and new_status != old_status:
             if new_status == "confirmed":
                 _notify(
@@ -348,10 +321,6 @@ class ProviderAppointmentDetailView(APIView):
 
 
 class AppointmentCaptureView(APIView):
-    """
-    GET/POST /provider/<identity_id>/appointments/<appointment_id>/captures
-    """
-
     def get(self, request, identity_id, appointment_id):
         captures = AppointmentCapture.objects.filter(
             appointment_id=appointment_id
@@ -376,7 +345,6 @@ class AppointmentCaptureView(APIView):
 
         capture = serializer.save(appointment=appointment)
 
-        # Refresh the patient's record summary
         if appointment.patient_identity:
             refresh_record_summary(appointment.patient_identity, appointment.provider)
 
@@ -389,6 +357,11 @@ class AppointmentCaptureView(APIView):
 class ProviderDashboardStatsView(APIView):
     """
     GET /provider/<identity_id>/dashboard/stats
+
+    Returns field names that exactly match what the frontend components expect:
+      MetricsRow  → today_count, this_week_appointments, total_patients_month, avg_duration_minutes
+      PendingActions → pending_count
+      WeeklyChart    → weekly_data: [{date, day, count}]
     """
 
     def get(self, request, identity_id):
@@ -398,37 +371,78 @@ class ProviderDashboardStatsView(APIView):
             return Response({"error": "Provider not found"}, status=status.HTTP_404_NOT_FOUND)
 
         now = timezone.now()
-        today_start = now.replace(hour=0, minute=0, second=0, microsecond=0)
-        today_end = now.replace(hour=23, minute=59, second=59, microsecond=999999)
+        today = now.date()
 
-        total = ProviderAppointment.objects.filter(provider=provider).count()
-        today = ProviderAppointment.objects.filter(
-            provider=provider, start_time__range=(today_start, today_end)
-        ).count()
-        upcoming = ProviderAppointment.objects.filter(
+        # ── Today's appointments ─────────────────────────────────────────────
+        today_count = ProviderAppointment.objects.filter(
             provider=provider,
-            start_time__gte=now,
-            status__in=["confirmed", "scheduled"],
-        ).count()
-        completed = ProviderAppointment.objects.filter(
-            provider=provider, status="completed"
+            start_time__date=today,
         ).count()
 
+        # ── This week (Mon → today) ──────────────────────────────────────────
+        week_start = today - timedelta(days=today.weekday())  # Monday
+        this_week_appointments = ProviderAppointment.objects.filter(
+            provider=provider,
+            start_time__date__gte=week_start,
+            start_time__date__lte=today,
+        ).count()
+
+        # ── Total unique patients this calendar month ────────────────────────
+        month_start = today.replace(day=1)
+        total_patients_month = (
+            ProviderAppointment.objects.filter(
+                provider=provider,
+                start_time__date__gte=month_start,
+            )
+            .values("patient_email")
+            .distinct()
+            .count()
+        )
+
+        # ── Average consultation duration (completed only) ───────────────────
         completed_qs = ProviderAppointment.objects.filter(
-            provider=provider, status="completed",
-            end_time__isnull=False, start_time__isnull=False
+            provider=provider,
+            status="completed",
+            end_time__isnull=False,
+            start_time__isnull=False,
         ).annotate(
             duration=ExpressionWrapper(
                 F("end_time") - F("start_time"), output_field=DurationField()
             )
         )
         avg_duration = completed_qs.aggregate(avg=Avg("duration"))["avg"]
-        avg_minutes = round(avg_duration.total_seconds() / 60) if avg_duration else 0
+        avg_duration_minutes = round(avg_duration.total_seconds() / 60) if avg_duration else 0
+
+        # ── Pending (unconfirmed / scheduled) appointments ───────────────────
+        pending_count = ProviderAppointment.objects.filter(
+            provider=provider,
+            status__in=["scheduled", "pending"],
+            start_time__gte=now,
+        ).count()
+
+        # ── Weekly data: last 7 days including today ─────────────────────────
+        DAY_ABBR = ["Mon", "Tue", "Wed", "Thu", "Fri", "Sat", "Sun"]
+        weekly_data = []
+        for i in range(6, -1, -1):          # 6 days ago → today
+            day_date = today - timedelta(days=i)
+            count = ProviderAppointment.objects.filter(
+                provider=provider,
+                start_time__date=day_date,
+            ).count()
+            weekly_data.append({
+                "date": day_date.isoformat(),
+                "day": DAY_ABBR[day_date.weekday()],
+                "count": count,
+            })
 
         return Response({
-            "total_appointments": total,
-            "today_appointments": today,
-            "upcoming_appointments": upcoming,
-            "completed_appointments": completed,
-            "average_duration_minutes": avg_minutes,
+            # MetricsRow fields
+            "today_count": today_count,
+            "this_week_appointments": this_week_appointments,
+            "total_patients_month": total_patients_month,
+            "avg_duration_minutes": avg_duration_minutes,
+            # PendingActions field
+            "pending_count": pending_count,
+            # WeeklyChart field
+            "weekly_data": weekly_data,
         })
