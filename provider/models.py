@@ -30,7 +30,9 @@ class Service(models.Model):
     provider = models.ForeignKey(HealthcareProvider, on_delete=models.CASCADE, related_name="services")
     name = models.CharField(max_length=200)
     estimated_duration = models.IntegerField(help_text="Duration in minutes")
-    price = models.DecimalField(max_digits=10, decimal_places=2)
+    # null=True, blank=True — price is optional. Providers can leave it blank
+    # to indicate the price is negotiable and agreed between provider and patient.
+    price = models.DecimalField(max_digits=10, decimal_places=2, null=True, blank=True)
     currency = models.CharField(max_length=10, default="KES")
     description = models.TextField(blank=True, null=True)
     price_visible = models.BooleanField(
