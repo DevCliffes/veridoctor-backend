@@ -5,363 +5,430 @@ from provider.models import HealthcareProvider
 from rest_framework import status
 from rest_framework.response import Response
 from rest_framework.views import APIView
-from datetime import timedelta
-
+from .models import ProviderAppointment, AppointmentCapture
+from .serializers import ProviderAppointmentSerializer, AppointmentCaptureSerializer
 from records.services import find_identity_by_email, refresh_record_summary
-from notifications.services import notify
-
-from .models import AppointmentCapture, ProviderAppointment
-from .serializers import AppointmentCaptureSerializer, ProviderAppointmentSerializer
 
 
-def auto_advance_status(appointment):
+def _notify(recipient_identity, notification_type, title, message="", link=""):
     """
-    Automatically advance appointment status based on time:
-    - Any newly created appointment defaults to 'confirmed' (handled at model level).
-    - If status is 'confirmed' and current time is within the appointment window,
-      advance to 'in-progress'.
-    - If status is 'in-progress' and the appointment end time has passed,
-      advance to 'completed'.
-    This is called on every GET of a single appointment so it stays current
-    without needing a background job.
+    Helper to create a notification. Wrapped in try/except so a notification
+    failure never breaks the main request — notifications are best-effort.
     """
-    now = timezone.now()
-    changed = False
-
-    if appointment.status == "confirmed" and appointment.start_time <= now <= appointment.end_time:
-        appointment.status = "in-progress"
-        changed = True
-    elif appointment.status in ("confirmed", "in-progress") and appointment.end_time < now:
-        appointment.status = "completed"
-        changed = True
-
-    if changed:
-        appointment.save(update_fields=["status"])
-
-    return appointment
-
-
-def _patient_display_name(appointment):
-    name = f"{appointment.patient_first_name} {appointment.patient_last_name}".strip()
-    return name or "A patient"
-
-
-def _provider_display_name(provider):
     try:
-        return f"Dr. {provider.identity.first_name} {provider.identity.last_name}".strip()
+        from notifications.models import Notification
+        Notification.objects.create(
+            recipient_identity=recipient_identity,
+            notification_type=notification_type,
+            title=title,
+            message=message,
+            link=link,
+        )
     except Exception:
-        return "Your provider"
+        pass
+
+
+class PatientAppointmentView(APIView):
+    """
+    Patient-facing appointment list and booking.
+    GET  /appointments?patient_email=<email>&filter=<upcoming|today|past>
+    POST /appointments  { ...booking fields... }
+    PATCH /appointments/<appointment_id>  { status, start_time, end_time }
+    """
+
+    def get(self, request):
+        patient_email = request.query_params.get("patient_email")
+        filter_type = request.query_params.get("filter", "upcoming")
+
+        if not patient_email:
+            return Response(
+                {"error": "patient_email is required"},
+                status=status.HTTP_400_BAD_REQUEST,
+            )
+
+        now = timezone.now()
+        qs = ProviderAppointment.objects.filter(
+            patient_email__iexact=patient_email
+        ).select_related("provider", "provider__identity", "service").order_by("start_time")
+
+        if filter_type == "today":
+            qs = qs.filter(start_time__date=now.date())
+        elif filter_type == "past":
+            qs = qs.filter(end_time__lt=now)
+        else:  # upcoming (default)
+            qs = qs.filter(start_time__gte=now).exclude(
+                status__in=["cancelled", "no-show"]
+            )
+
+        data = []
+        for appt in qs:
+            provider = appt.provider
+            identity = provider.identity if provider else None
+            data.append({
+                "id": str(appt.id),
+                "doctor_first_name": identity.first_name if identity else "",
+                "doctor_last_name": identity.last_name if identity else "",
+                "provider_id": str(provider.id) if provider else None,
+                "patient_first_name": appt.patient_first_name,
+                "patient_last_name": appt.patient_last_name,
+                "patient_email": appt.patient_email,
+                "patient_phone_number": appt.patient_phone_number,
+                "patient_identity": str(appt.patient_identity_id) if appt.patient_identity_id else None,
+                "appointment_type": appt.appointment_type,
+                "service": str(appt.service_id) if appt.service_id else None,
+                "service_name": appt.service.name if appt.service else None,
+                "message": appt.message,
+                "start_time": appt.start_time.isoformat(),
+                "end_time": appt.end_time.isoformat(),
+                "status": appt.status,
+                "meet_id": appt.meet_id,
+                "created_at": appt.created_at.isoformat(),
+            })
+
+        return Response(data)
+
+    def post(self, request):
+        serializer = ProviderAppointmentSerializer(data=request.data)
+        if not serializer.is_valid():
+            return Response(serializer.errors, status=status.HTTP_400_BAD_REQUEST)
+
+        appointment = serializer.save()
+
+        # Link to patient identity if their email matches a registered account
+        patient_identity = find_identity_by_email(appointment.patient_email)
+        if patient_identity:
+            appointment.patient_identity = patient_identity
+            appointment.save(update_fields=["patient_identity"])
+            refresh_record_summary(patient_identity, appointment.provider)
+
+        # Notify the provider that a new appointment was booked
+        if appointment.provider and appointment.provider.identity:
+            provider_identity = appointment.provider.identity
+            patient_name = f"{appointment.patient_first_name} {appointment.patient_last_name}".strip()
+            _notify(
+                recipient_identity=provider_identity,
+                notification_type="appointment_booked",
+                title="New appointment booked",
+                message=f"{patient_name} booked an appointment on "
+                        f"{appointment.start_time.strftime('%d %b %Y at %H:%M')}.",
+                link=f"/appointments/{appointment.id}",
+            )
+
+        # Notify the patient that their booking was received (if they have an account)
+        if patient_identity:
+            provider_name = ""
+            if appointment.provider and appointment.provider.identity:
+                pi = appointment.provider.identity
+                provider_name = f"Dr. {pi.first_name} {pi.last_name}"
+            _notify(
+                recipient_identity=patient_identity,
+                notification_type="appointment_booked",
+                title="Appointment confirmed",
+                message=f"Your appointment with {provider_name} on "
+                        f"{appointment.start_time.strftime('%d %b %Y at %H:%M')} is booked.",
+                link="/appointments",
+            )
+
+        return Response(
+            ProviderAppointmentSerializer(appointment).data,
+            status=status.HTTP_201_CREATED,
+        )
+
+    def patch(self, request, appointment_id):
+        try:
+            appointment = ProviderAppointment.objects.select_related(
+                "provider", "provider__identity", "patient_identity"
+            ).get(id=appointment_id)
+        except ProviderAppointment.DoesNotExist:
+            return Response({"error": "Appointment not found"}, status=status.HTTP_404_NOT_FOUND)
+
+        old_status = appointment.status
+        serializer = ProviderAppointmentSerializer(
+            appointment, data=request.data, partial=True
+        )
+        if not serializer.is_valid():
+            return Response(serializer.errors, status=status.HTTP_400_BAD_REQUEST)
+
+        updated = serializer.save()
+        new_status = updated.status
+
+        patient_identity = updated.patient_identity
+        provider_name = ""
+        if updated.provider and updated.provider.identity:
+            pi = updated.provider.identity
+            provider_name = f"Dr. {pi.first_name} {pi.last_name}"
+
+        # Notify patient when status changes
+        if patient_identity and new_status != old_status:
+            if new_status == "confirmed":
+                _notify(
+                    recipient_identity=patient_identity,
+                    notification_type="appointment_confirmed",
+                    title="Appointment confirmed",
+                    message=f"Your appointment with {provider_name} has been confirmed.",
+                    link="/appointments",
+                )
+            elif new_status == "cancelled":
+                _notify(
+                    recipient_identity=patient_identity,
+                    notification_type="appointment_cancelled",
+                    title="Appointment cancelled",
+                    message=f"Your appointment with {provider_name} has been cancelled.",
+                    link="/appointments",
+                )
+            elif new_status == "rescheduled":
+                _notify(
+                    recipient_identity=patient_identity,
+                    notification_type="appointment_rescheduled",
+                    title="Appointment rescheduled",
+                    message=f"Your appointment with {provider_name} has been rescheduled.",
+                    link="/appointments",
+                )
+
+        return Response(ProviderAppointmentSerializer(updated).data)
 
 
 class ProviderAppointmentView(APIView):
-    def get(self, request, identity_id):
-        try:
-            identity = Identity.objects.get(id=identity_id)
-            provider = HealthcareProvider.objects.get(identity=identity)
-        except (Identity.DoesNotExist, HealthcareProvider.DoesNotExist):
-            return Response({"error": "Provider not found"}, status=status.HTTP_404_NOT_FOUND)
+    """
+    Provider-facing appointment list and creation.
+    GET  /provider/<identity_id>/appointments?filter=<upcoming|today|past>
+    POST /provider/<identity_id>/appointments
+    """
 
-        appointments = ProviderAppointment.objects.filter(provider=provider)
+    def get(self, request, identity_id):
+        filter_type = request.query_params.get("filter", "upcoming")
         now = timezone.now()
 
-        filter_type = request.query_params.get("filter")
-        appointment_type = request.query_params.get("appointment_type")
+        try:
+            provider = HealthcareProvider.objects.get(identity__id=identity_id)
+        except HealthcareProvider.DoesNotExist:
+            return Response({"error": "Provider not found"}, status=status.HTTP_404_NOT_FOUND)
+
+        qs = ProviderAppointment.objects.filter(
+            provider=provider
+        ).select_related("service").order_by("start_time")
 
         if filter_type == "today":
-            appointments = appointments.filter(
-                start_time__date=now.astimezone(timezone.get_current_timezone()).date()
-            )
-            appointments = appointments.order_by("start_time")
-        elif filter_type == "upcoming":
-            appointments = appointments.filter(start_time__gt=now)
-            appointments = appointments.order_by("start_time")
+            qs = qs.filter(start_time__date=now.date())
         elif filter_type == "past":
-            appointments = appointments.filter(start_time__lt=now)
-            appointments = appointments.order_by("-start_time")
-        else:
-            appointments = appointments.order_by("start_time")
+            qs = qs.filter(end_time__lt=now)
+        elif filter_type == "all":
+            pass
+        else:  # upcoming
+            qs = qs.filter(start_time__gte=now).exclude(
+                status__in=["cancelled", "no-show"]
+            )
 
-        if appointment_type:
-            appointments = appointments.filter(appointment_type=appointment_type)
-
-        serializer = ProviderAppointmentSerializer(appointments, many=True)
+        serializer = ProviderAppointmentSerializer(qs, many=True)
         return Response(serializer.data)
 
     def post(self, request, identity_id):
         try:
-            identity = Identity.objects.get(id=identity_id)
-            provider = HealthcareProvider.objects.get(identity=identity)
-        except (Identity.DoesNotExist, HealthcareProvider.DoesNotExist):
+            provider = HealthcareProvider.objects.get(identity__id=identity_id)
+        except HealthcareProvider.DoesNotExist:
             return Response({"error": "Provider not found"}, status=status.HTTP_404_NOT_FOUND)
 
-        patient_email = (request.data.get("patient_email") or "").strip()
-        if not patient_email:
-            return Response(
-                {"error": "patient_email is required to book an appointment."},
-                status=status.HTTP_400_BAD_REQUEST,
-            )
+        data = request.data.copy()
+        data["provider"] = provider.id
 
-        # Force status to confirmed on creation regardless of what was sent
-        data = {**request.data, "patient_email": patient_email, "status": "confirmed"}
         serializer = ProviderAppointmentSerializer(data=data)
-        if serializer.is_valid():
-            patient_identity = find_identity_by_email(patient_email)
-            appointment = serializer.save(provider=provider, patient_identity=patient_identity)
+        if not serializer.is_valid():
+            return Response(serializer.errors, status=status.HTTP_400_BAD_REQUEST)
+
+        appointment = serializer.save(provider=provider)
+
+        # Link patient identity
+        patient_identity = find_identity_by_email(appointment.patient_email)
+        if patient_identity:
+            appointment.patient_identity = patient_identity
+            appointment.save(update_fields=["patient_identity"])
             refresh_record_summary(patient_identity, provider)
 
-            # Notify the patient, if they have a linked account. Booking can
-            # happen with just an email (no account yet), so this is None-safe.
-            notify(
+            # Notify patient that the provider created an appointment for them
+            provider_name = f"Dr. {provider.identity.first_name} {provider.identity.last_name}"
+            _notify(
                 recipient_identity=patient_identity,
                 notification_type="appointment_booked",
-                title="Appointment confirmed",
-                message=f"Your appointment with {_provider_display_name(provider)} "
-                        f"is confirmed for {appointment.start_time.strftime('%b %d, %Y at %H:%M')}.",
-                link=f"/appointments/{appointment.id}",
+                title="Appointment scheduled",
+                message=f"{provider_name} has scheduled an appointment for you on "
+                        f"{appointment.start_time.strftime('%d %b %Y at %H:%M')}.",
+                link="/appointments",
             )
 
-            return Response(ProviderAppointmentSerializer(appointment).data, status=status.HTTP_201_CREATED)
-        return Response(serializer.errors, status=status.HTTP_400_BAD_REQUEST)
+        return Response(
+            ProviderAppointmentSerializer(appointment).data,
+            status=status.HTTP_201_CREATED,
+        )
 
 
 class ProviderAppointmentDetailView(APIView):
+    """
+    GET/PATCH/DELETE /provider/<identity_id>/appointments/<appointment_id>
+    """
+
     def get(self, request, identity_id, appointment_id):
         try:
-            appointment = ProviderAppointment.objects.get(id=appointment_id)
+            appointment = ProviderAppointment.objects.select_related(
+                "service", "patient_identity"
+            ).get(id=appointment_id)
         except ProviderAppointment.DoesNotExist:
-            return Response({"error": "Appointment not found"}, status=status.HTTP_404_NOT_FOUND)
+            return Response({"error": "Not found"}, status=status.HTTP_404_NOT_FOUND)
 
-        # Auto-advance status based on current time before returning
-        appointment = auto_advance_status(appointment)
-
-        serializer = ProviderAppointmentSerializer(appointment)
-        return Response(serializer.data)
+        return Response(ProviderAppointmentSerializer(appointment).data)
 
     def patch(self, request, identity_id, appointment_id):
         try:
-            appointment = ProviderAppointment.objects.get(id=appointment_id)
+            appointment = ProviderAppointment.objects.select_related(
+                "provider", "provider__identity", "patient_identity"
+            ).get(id=appointment_id)
         except ProviderAppointment.DoesNotExist:
-            return Response({"error": "Appointment not found"}, status=status.HTTP_404_NOT_FOUND)
+            return Response({"error": "Not found"}, status=status.HTTP_404_NOT_FOUND)
 
-        # Prevent manually setting confirmed or in-progress — those are automatic
-        incoming_status = request.data.get("status")
-        if incoming_status in ("confirmed", "in-progress"):
-            return Response(
-                {"error": "This status is set automatically and cannot be manually assigned."},
-                status=status.HTTP_400_BAD_REQUEST,
-            )
-
-        # Determine what's actually changing before saving, so we know which
-        # notification (if any) to send — and so the "rescheduled" message
-        # can mention the new time, and "cancelled" doesn't also fire as if
-        # it were a reschedule.
-        is_being_cancelled = incoming_status == "cancelled" and appointment.status != "cancelled"
-        is_being_rescheduled = (
-            not is_being_cancelled
-            and ("start_time" in request.data or "end_time" in request.data)
+        old_status = appointment.status
+        serializer = ProviderAppointmentSerializer(
+            appointment, data=request.data, partial=True
         )
+        if not serializer.is_valid():
+            return Response(serializer.errors, status=status.HTTP_400_BAD_REQUEST)
 
-        serializer = ProviderAppointmentSerializer(appointment, data=request.data, partial=True)
-        if serializer.is_valid():
-            updated_appointment = serializer.save()
+        updated = serializer.save()
+        new_status = updated.status
 
-            # This PATCH is provider-initiated (it's under the provider/<id>/
-            # appointments/<id> route), so the notification goes to the patient.
-            if is_being_cancelled and updated_appointment.patient_identity:
-                notify(
-                    recipient_identity=updated_appointment.patient_identity,
+        patient_identity = updated.patient_identity
+        provider_name = ""
+        if updated.provider and updated.provider.identity:
+            pi = updated.provider.identity
+            provider_name = f"Dr. {pi.first_name} {pi.last_name}"
+
+        # Notify patient on status change
+        if patient_identity and new_status != old_status:
+            if new_status == "confirmed":
+                _notify(
+                    recipient_identity=patient_identity,
+                    notification_type="appointment_confirmed",
+                    title="Appointment confirmed",
+                    message=f"Your appointment with {provider_name} has been confirmed.",
+                    link="/appointments",
+                )
+            elif new_status == "cancelled":
+                _notify(
+                    recipient_identity=patient_identity,
                     notification_type="appointment_cancelled",
                     title="Appointment cancelled",
-                    message=f"Your appointment with "
-                            f"{_provider_display_name(updated_appointment.provider)} "
-                            f"on {updated_appointment.start_time.strftime('%b %d, %Y at %H:%M')} "
-                            f"has been cancelled.",
-                    link=f"/appointments/{updated_appointment.id}",
+                    message=f"Your appointment with {provider_name} has been cancelled.",
+                    link="/appointments",
                 )
-            elif is_being_rescheduled and updated_appointment.patient_identity:
-                notify(
-                    recipient_identity=updated_appointment.patient_identity,
+            elif new_status == "rescheduled":
+                _notify(
+                    recipient_identity=patient_identity,
                     notification_type="appointment_rescheduled",
                     title="Appointment rescheduled",
-                    message=f"Your appointment with "
-                            f"{_provider_display_name(updated_appointment.provider)} "
-                            f"has been moved to "
-                            f"{updated_appointment.start_time.strftime('%b %d, %Y at %H:%M')}.",
-                    link=f"/appointments/{updated_appointment.id}",
+                    message=f"Your appointment with {provider_name} has been rescheduled.",
+                    link="/appointments",
+                )
+            elif new_status == "in-progress":
+                _notify(
+                    recipient_identity=patient_identity,
+                    notification_type="appointment_confirmed",
+                    title="Your consultation has started",
+                    message=f"Your consultation with {provider_name} is now in progress.",
+                    link="/appointments",
                 )
 
-            return Response(serializer.data)
-        return Response(serializer.errors, status=status.HTTP_400_BAD_REQUEST)
+        return Response(ProviderAppointmentSerializer(updated).data)
 
     def delete(self, request, identity_id, appointment_id):
         try:
             appointment = ProviderAppointment.objects.get(id=appointment_id)
         except ProviderAppointment.DoesNotExist:
-            return Response({"error": "Appointment not found"}, status=status.HTTP_404_NOT_FOUND)
+            return Response({"error": "Not found"}, status=status.HTTP_404_NOT_FOUND)
+
         appointment.delete()
         return Response(status=status.HTTP_204_NO_CONTENT)
 
 
 class AppointmentCaptureView(APIView):
-    def get(self, request, identity_id, appointment_id):
-        try:
-            appointment = ProviderAppointment.objects.get(id=appointment_id)
-        except ProviderAppointment.DoesNotExist:
-            return Response({"error": "Appointment not found"}, status=status.HTTP_404_NOT_FOUND)
+    """
+    GET/POST /provider/<identity_id>/appointments/<appointment_id>/captures
+    """
 
-        captures = AppointmentCapture.objects.filter(appointment=appointment)
+    def get(self, request, identity_id, appointment_id):
+        captures = AppointmentCapture.objects.filter(
+            appointment_id=appointment_id
+        ).order_by("-created_at")
         serializer = AppointmentCaptureSerializer(captures, many=True)
         return Response(serializer.data)
 
     def post(self, request, identity_id, appointment_id):
         try:
-            appointment = ProviderAppointment.objects.get(id=appointment_id)
+            appointment = ProviderAppointment.objects.select_related(
+                "provider", "patient_identity"
+            ).get(id=appointment_id)
         except ProviderAppointment.DoesNotExist:
             return Response({"error": "Appointment not found"}, status=status.HTTP_404_NOT_FOUND)
 
-        from provider.models import Form
-        form_snapshot = []
-        form_id = request.data.get("form_id")
-        if form_id:
-            try:
-                form = Form.objects.get(id=form_id)
-                form_snapshot = form.sections
-            except Form.DoesNotExist:
-                pass
+        data = request.data.copy()
+        data["appointment"] = appointment_id
 
-        data = {**request.data, "form_snapshot": form_snapshot}
         serializer = AppointmentCaptureSerializer(data=data)
-        if serializer.is_valid():
-            capture = serializer.save(appointment=appointment)
+        if not serializer.is_valid():
+            return Response(serializer.errors, status=status.HTTP_400_BAD_REQUEST)
+
+        capture = serializer.save(appointment=appointment)
+
+        # Refresh the patient's record summary
+        if appointment.patient_identity:
             refresh_record_summary(appointment.patient_identity, appointment.provider)
-            return Response(AppointmentCaptureSerializer(capture).data, status=status.HTTP_201_CREATED)
-        return Response(serializer.errors, status=status.HTTP_400_BAD_REQUEST)
+
+        return Response(
+            AppointmentCaptureSerializer(capture).data,
+            status=status.HTTP_201_CREATED,
+        )
 
 
 class ProviderDashboardStatsView(APIView):
+    """
+    GET /provider/<identity_id>/dashboard/stats
+    """
+
     def get(self, request, identity_id):
         try:
-            identity = Identity.objects.get(id=identity_id)
-            provider = HealthcareProvider.objects.get(identity=identity)
-        except (Identity.DoesNotExist, HealthcareProvider.DoesNotExist):
+            provider = HealthcareProvider.objects.get(identity__id=identity_id)
+        except HealthcareProvider.DoesNotExist:
             return Response({"error": "Provider not found"}, status=status.HTTP_404_NOT_FOUND)
 
         now = timezone.now()
-        local_now = now.astimezone(timezone.get_current_timezone())
-        today = local_now.date()
+        today_start = now.replace(hour=0, minute=0, second=0, microsecond=0)
+        today_end = now.replace(hour=23, minute=59, second=59, microsecond=999999)
 
-        week_start = now - timedelta(days=now.weekday())
-        week_start = week_start.replace(hour=0, minute=0, second=0, microsecond=0)
-        week_end = week_start + timedelta(days=7)
-
-        month_start = now.replace(day=1, hour=0, minute=0, second=0, microsecond=0)
-
-        base_qs = ProviderAppointment.objects.filter(provider=provider)
-
-        today_qs = base_qs.filter(start_time__date=today)
-        today_count = today_qs.count()
-
-        upcoming_today = today_qs.filter(
-            start_time__gt=now,
-            status__in=["scheduled", "confirmed"]
+        total = ProviderAppointment.objects.filter(provider=provider).count()
+        today = ProviderAppointment.objects.filter(
+            provider=provider, start_time__range=(today_start, today_end)
+        ).count()
+        upcoming = ProviderAppointment.objects.filter(
+            provider=provider,
+            start_time__gte=now,
+            status__in=["confirmed", "scheduled"],
+        ).count()
+        completed = ProviderAppointment.objects.filter(
+            provider=provider, status="completed"
         ).count()
 
-        pending_count = base_qs.filter(status="scheduled").count()
-
-        week_qs = base_qs.filter(start_time__gte=week_start, start_time__lt=week_end)
-        this_week_appointments = week_qs.count()
-        this_week_patients = week_qs.values("patient_email").distinct().count()
-
-        month_qs = base_qs.filter(start_time__gte=month_start)
-        total_patients_month = month_qs.exclude(status="cancelled").count()
-
-        month_with_duration = month_qs.exclude(status="cancelled").annotate(
+        completed_qs = ProviderAppointment.objects.filter(
+            provider=provider, status="completed",
+            end_time__isnull=False, start_time__isnull=False
+        ).annotate(
             duration=ExpressionWrapper(
                 F("end_time") - F("start_time"), output_field=DurationField()
             )
         )
-        avg_duration_td = month_with_duration.aggregate(avg=Avg("duration"))["avg"]
-        avg_duration_minutes = int(avg_duration_td.total_seconds() / 60) if avg_duration_td else 0
-
-        weekly_data = []
-        for i in range(6, -1, -1):
-            day = (local_now - timedelta(days=i)).date()
-            count = base_qs.filter(start_time__date=day).count()
-            weekly_data.append({
-                "date": day.isoformat(),
-                "day": day.strftime("%a"),
-                "count": count,
-            })
+        avg_duration = completed_qs.aggregate(avg=Avg("duration"))["avg"]
+        avg_minutes = round(avg_duration.total_seconds() / 60) if avg_duration else 0
 
         return Response({
-            "today_count": today_count,
-            "upcoming_today": upcoming_today,
-            "pending_count": pending_count,
-            "this_week_appointments": this_week_appointments,
-            "this_week_patients": this_week_patients,
-            "total_patients_month": total_patients_month,
-            "avg_duration_minutes": avg_duration_minutes,
-            "weekly_data": weekly_data,
+            "total_appointments": total,
+            "today_appointments": today,
+            "upcoming_appointments": upcoming,
+            "completed_appointments": completed,
+            "average_duration_minutes": avg_minutes,
         })
-
-
-class PatientAppointmentView(APIView):
-    def get(self, request):
-        patient_email = request.query_params.get("patient_email")
-        if not patient_email:
-            return Response(
-                {"error": "patient_email query parameter is required"},
-                status=status.HTTP_400_BAD_REQUEST,
-            )
-
-        appointments = ProviderAppointment.objects.filter(patient_email=patient_email)
-        now = timezone.now()
-        today = now.astimezone(timezone.get_current_timezone()).date()
-        filter_type = request.query_params.get("filter", "upcoming")
-
-        if filter_type == "today":
-            appointments = appointments.filter(start_time__date=today)
-        elif filter_type == "past":
-            appointments = appointments.filter(start_time__lt=now)
-        else:
-            appointments = appointments.filter(start_time__gte=now)
-
-        appointments = appointments.order_by("start_time")
-        serializer = ProviderAppointmentSerializer(appointments, many=True)
-        return Response(serializer.data)
-
-    def patch(self, request):
-        appointment_id = request.query_params.get("appointment_id")
-        if not appointment_id:
-            return Response(
-                {"error": "appointment_id query parameter is required"},
-                status=status.HTTP_400_BAD_REQUEST,
-            )
-        try:
-            appointment = ProviderAppointment.objects.get(id=appointment_id)
-        except ProviderAppointment.DoesNotExist:
-            return Response({"error": "Appointment not found"}, status=status.HTTP_404_NOT_FOUND)
-
-        appointment.status = "cancelled"
-        appointment.save()
-
-        # This PATCH is patient-initiated, so the notification goes to the
-        # provider. provider.identity is reached via the existing FK — no
-        # new query needed.
-        try:
-            provider_identity = appointment.provider.identity
-        except Exception:
-            provider_identity = None
-
-        notify(
-            recipient_identity=provider_identity,
-            notification_type="appointment_cancelled",
-            title="Appointment cancelled",
-            message=f"{_patient_display_name(appointment)} cancelled their "
-                    f"appointment scheduled for "
-                    f"{appointment.start_time.strftime('%b %d, %Y at %H:%M')}.",
-            link=f"/appointments/{appointment.id}",
-        )
-
-        serializer = ProviderAppointmentSerializer(appointment)
-        return Response(serializer.data)
