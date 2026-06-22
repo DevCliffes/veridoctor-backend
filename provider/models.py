@@ -19,6 +19,30 @@ class HealthcareProvider(models.Model):
     insurances_accepted = models.JSONField(default=list, blank=True)
     languages = models.JSONField(default=list, blank=True)
     profile_picture_url = models.URLField(blank=True, null=True)
+
+    # ── Personal identification ───────────────────────────────────────────────
+    national_id_number = models.CharField(max_length=50, blank=True, default="")
+    national_id_image = models.CharField(max_length=500, blank=True, default="")
+
+    # ── Practice & location documents ─────────────────────────────────────────
+    clinic_logo_url = models.CharField(max_length=500, blank=True, default="")
+    business_reg_number = models.CharField(max_length=100, blank=True, default="")
+    business_reg_image = models.CharField(max_length=500, blank=True, default="")
+    operating_licence = models.CharField(max_length=100, blank=True, default="")
+    operating_licence_image = models.CharField(max_length=500, blank=True, default="")
+    kra_pin = models.CharField(max_length=50, blank=True, default="")
+    kra_pin_image = models.CharField(max_length=500, blank=True, default="")
+    cr12_image = models.CharField(max_length=500, blank=True, default="")
+
+    # ── Professional credentials ───────────────────────────────────────────────
+    valid_licence_number = models.CharField(max_length=100, blank=True, default="")
+    valid_licence_image = models.CharField(max_length=500, blank=True, default="")
+    extra_credentials = models.JSONField(
+        default=list,
+        blank=True,
+        help_text="List of additional credentials e.g. [{'id': '...', 'name': 'KMPDB', 'number': '...', 'image_url': '...'}]",
+    )
+
     created_at = models.DateTimeField(auto_now_add=True)
 
     def __str__(self):
@@ -70,8 +94,8 @@ class Prescription(models.Model):
         blank=True,
         related_name="prescriptions_received",
         help_text="Linked automatically by matching patient_email to an "
-                   "Identity at creation time. May be null for older "
-                   "records until the backfill command links them.",
+                  "Identity at creation time. May be null for older "
+                  "records until the backfill command links them.",
     )
     diagnosis = models.TextField(blank=True, null=True)
     notes = models.TextField(blank=True, null=True)
@@ -140,7 +164,7 @@ class ProviderSchedule(models.Model):
         default=list,
         blank=True,
         help_text="ISO date strings (YYYY-MM-DD) to skip for recurring schedules — "
-                   "used when deleting/editing a single occurrence instead of the whole series."
+                  "used when deleting/editing a single occurrence instead of the whole series."
     )
 
     created_at = models.DateTimeField(auto_now_add=True)
