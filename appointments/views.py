@@ -2,7 +2,7 @@ from django.utils import timezone
 from django.db.models import Avg, F, ExpressionWrapper, DurationField, Count
 from datetime import timedelta
 from identity.models import Identity
-from provider.models import HealthcareProvider
+from provider.models import HealthcareProvider, Prescription, PrescriptionDrug
 from rest_framework import status
 from rest_framework.response import Response
 from rest_framework.views import APIView
@@ -23,6 +23,147 @@ def _notify(recipient_identity, notification_type, title, message="", link=""):
         )
     except Exception:
         pass
+
+
+def _extract_prescription_from_capture(capture, appointment):
+    """
+    Scans a completed capture's form_snapshot and values for prescription-like
+    fields (drugs, diagnosis, notes) and auto-creates a Prescription record
+    linked to the same appointment and patient if enough data is found.
+
+    Looks for sections or fields whose label/name contains keywords:
+    'prescription', 'drug', 'medication', 'diagnosis', 'dosage'.
+
+    Returns the created Prescription or None if nothing prescription-like found.
+    """
+    try:
+        snapshot = capture.form_snapshot or []
+        values = capture.values or {}
+
+        if not snapshot or not values:
+            return None
+
+        # Build a label map: field_id -> label/name
+        label_map = {}
+        for section in snapshot:
+            for field in section.get("fields", []):
+                fid = field.get("id")
+                if fid:
+                    label_map[fid] = (field.get("label") or field.get("name") or fid).lower()
+
+        # Keywords that signal prescription content
+        PRESCRIPTION_KEYWORDS = {"prescription", "drug", "medication", "dosage", "diagnosis", "medicine"}
+
+        # Check if any field in this capture looks prescription-related
+        has_prescription_content = any(
+            any(kw in label for kw in PRESCRIPTION_KEYWORDS)
+            for label in label_map.values()
+        )
+
+        if not has_prescription_content:
+            return None
+
+        # Extract diagnosis and notes from matching fields
+        diagnosis_parts = []
+        notes_parts = []
+        drug_entries = []
+
+        for field_id, label in label_map.items():
+            val = values.get(field_id)
+            if not val:
+                continue
+
+            if "diagnosis" in label:
+                diagnosis_parts.append(str(val))
+
+            elif "note" in label or "comment" in label or "remark" in label:
+                notes_parts.append(str(val))
+
+            elif any(kw in label for kw in ("drug", "medication", "medicine", "prescription")):
+                # val could be a list of drug objects or a plain string
+                if isinstance(val, list):
+                    for item in val:
+                        if isinstance(item, dict):
+                            drug_entries.append({
+                                "drug_name": item.get("drug_name") or item.get("name") or item.get("medication") or "Unknown",
+                                "dosage": item.get("dosage") or item.get("dose") or "",
+                                "frequency": item.get("frequency") or item.get("freq") or "",
+                                "duration": item.get("duration") or "",
+                                "instructions": item.get("instructions") or item.get("notes") or "",
+                            })
+                        else:
+                            drug_entries.append({
+                                "drug_name": str(item),
+                                "dosage": "", "frequency": "", "duration": "", "instructions": "",
+                            })
+                elif isinstance(val, str) and val.strip():
+                    drug_entries.append({
+                        "drug_name": val.strip(),
+                        "dosage": "", "frequency": "", "duration": "", "instructions": "",
+                    })
+
+            elif "dosage" in label or "dose" in label:
+                # Standalone dosage field — attach to the last drug if one exists
+                if drug_entries:
+                    drug_entries[-1]["dosage"] = str(val)
+
+            elif "frequency" in label or "freq" in label:
+                if drug_entries:
+                    drug_entries[-1]["frequency"] = str(val)
+
+            elif "duration" in label:
+                if drug_entries:
+                    drug_entries[-1]["duration"] = str(val)
+
+        # Only create a prescription if there's something meaningful
+        if not diagnosis_parts and not drug_entries:
+            return None
+
+        provider = appointment.provider
+        patient_identity = appointment.patient_identity
+        patient_email = appointment.patient_email or (
+            patient_identity.email if patient_identity else ""
+        )
+        patient_name = f"{appointment.patient_first_name} {appointment.patient_last_name}".strip()
+
+        prescription = Prescription.objects.create(
+            provider=provider,
+            patient_name=patient_name,
+            patient_email=patient_email,
+            patient_identity=patient_identity,
+            diagnosis=" | ".join(diagnosis_parts),
+            notes=" | ".join(notes_parts),
+        )
+
+        for drug in drug_entries:
+            PrescriptionDrug.objects.create(
+                prescription=prescription,
+                drug_name=drug["drug_name"],
+                dosage=drug["dosage"],
+                frequency=drug["frequency"] or "As directed",
+                duration=drug["duration"] or "As directed",
+                instructions=drug["instructions"],
+            )
+
+        # Notify patient a prescription is ready
+        if patient_identity:
+            provider_name = ""
+            if provider and provider.identity:
+                pi = provider.identity
+                provider_name = f"Dr. {pi.first_name} {pi.last_name}"
+            _notify(
+                recipient_identity=patient_identity,
+                notification_type="prescription_ready",
+                title="New prescription issued",
+                message=f"{provider_name} has issued a prescription for you.",
+                link="/prescriptions",
+            )
+
+        return prescription
+
+    except Exception:
+        # Never crash the capture save because of prescription extraction
+        return None
 
 
 class PatientAppointmentView(APIView):
@@ -331,7 +472,7 @@ class AppointmentCaptureView(APIView):
     def post(self, request, identity_id, appointment_id):
         try:
             appointment = ProviderAppointment.objects.select_related(
-                "provider", "patient_identity"
+                "provider", "provider__identity", "patient_identity"
             ).get(id=appointment_id)
         except ProviderAppointment.DoesNotExist:
             return Response({"error": "Appointment not found"}, status=status.HTTP_404_NOT_FOUND)
@@ -345,8 +486,12 @@ class AppointmentCaptureView(APIView):
 
         capture = serializer.save(appointment=appointment)
 
+        # Refresh patient record summary
         if appointment.patient_identity:
             refresh_record_summary(appointment.patient_identity, appointment.provider)
+
+        # Auto-create prescription if the capture contains prescription-like fields
+        _extract_prescription_from_capture(capture, appointment)
 
         return Response(
             AppointmentCaptureSerializer(capture).data,
@@ -380,15 +525,15 @@ class ProviderDashboardStatsView(APIView):
         ).count()
 
         # ── This week (Mon → Sun of current ISO week) ───────────────────────
-        week_start = today - timedelta(days=today.weekday())   # Monday
-        week_end = week_start + timedelta(days=6)              # Sunday
+        week_start = today - timedelta(days=today.weekday())
+        week_end = week_start + timedelta(days=6)
         this_week_appointments = ProviderAppointment.objects.filter(
             provider=provider,
             start_time__date__gte=week_start,
             start_time__date__lte=week_end,
         ).count()
 
-        # ── Total patients this calendar month (every appointment counts) ────
+        # ── Total patients this calendar month ───────────────────────────────
         month_start = today.replace(day=1)
         total_patients_month = ProviderAppointment.objects.filter(
             provider=provider,
@@ -409,7 +554,7 @@ class ProviderDashboardStatsView(APIView):
         avg_duration = completed_qs.aggregate(avg=Avg("duration"))["avg"]
         avg_duration_minutes = round(avg_duration.total_seconds() / 60) if avg_duration else 0
 
-        # ── Pending (unconfirmed / scheduled) appointments ───────────────────
+        # ── Pending appointments ─────────────────────────────────────────────
         pending_count = ProviderAppointment.objects.filter(
             provider=provider,
             status__in=["scheduled", "pending"],
@@ -419,7 +564,7 @@ class ProviderDashboardStatsView(APIView):
         # ── Weekly data: last 7 days including today ─────────────────────────
         DAY_ABBR = ["Mon", "Tue", "Wed", "Thu", "Fri", "Sat", "Sun"]
         weekly_data = []
-        for i in range(6, -1, -1):          # 6 days ago → today
+        for i in range(6, -1, -1):
             day_date = today - timedelta(days=i)
             count = ProviderAppointment.objects.filter(
                 provider=provider,
@@ -432,13 +577,10 @@ class ProviderDashboardStatsView(APIView):
             })
 
         return Response({
-            # MetricsRow fields
             "today_count": today_count,
             "this_week_appointments": this_week_appointments,
             "total_patients_month": total_patients_month,
             "avg_duration_minutes": avg_duration_minutes,
-            # PendingActions field
             "pending_count": pending_count,
-            # WeeklyChart field
             "weekly_data": weekly_data,
         })
