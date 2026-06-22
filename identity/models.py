@@ -99,6 +99,11 @@ class patientAccount(BaseModel):
         blank=True,
         help_text="List of allergy strings e.g. ['Penicillin', 'Latex']",
     )
+    insurances = models.JSONField(
+        default=list,
+        blank=True,
+        help_text="Insurance providers the patient is covered under e.g. ['NHIF', 'AAR']",
+    )
 
     def save(self, *args, **kwargs):
         if not self.patient_uid:
