@@ -6,6 +6,8 @@ django.setup()
 from django.db import connection
 
 with connection.cursor() as cursor:
+
+    # ── prescription fixes ───────────────────────────────────────────────────
     cursor.execute(
         "ALTER TABLE provider_prescription ADD COLUMN IF NOT EXISTS patient_email varchar(254) NULL;"
     )
@@ -16,7 +18,7 @@ with connection.cursor() as cursor:
         "UPDATE provider_prescriptiondrug SET drug_name = name WHERE drug_name = '' AND name IS NOT NULL;"
     )
 
-    # patientAccount missing columns
+    # ── patientAccount missing columns ───────────────────────────────────────
     cursor.execute(
         "ALTER TABLE identity_patientaccount ADD COLUMN IF NOT EXISTS date_of_birth date NULL;"
     )
@@ -26,11 +28,14 @@ with connection.cursor() as cursor:
     cursor.execute(
         "ALTER TABLE identity_patientaccount ADD COLUMN IF NOT EXISTS allergies jsonb NOT NULL DEFAULT '[]';"
     )
+    cursor.execute(
+        "ALTER TABLE identity_patientaccount ADD COLUMN IF NOT EXISTS insurances jsonb NOT NULL DEFAULT '[]';"
+    )
 
-    # healthcare provider account fixes — licence_number must allow NULL
-    # so multiple providers without a licence on file don't collide on
-    # a shared unique='' value, which was causing 500s on every signup
-    # after the first.
+    # ── healthcare provider account fixes ────────────────────────────────────
+    # licence_number must allow NULL so multiple providers without a licence
+    # on file don't collide on a shared unique='' value, which was causing
+    # 500s on every signup after the first.
     cursor.execute(
         "ALTER TABLE identity_healthcareprovideraccount ALTER COLUMN licence_number DROP NOT NULL;"
     )
@@ -38,13 +43,38 @@ with connection.cursor() as cursor:
         "UPDATE identity_healthcareprovideraccount SET licence_number = NULL WHERE licence_number = '';"
     )
 
-    # ── notifications_notification table ────────────────────────────────
-    # The notifications app's model was never given a real Django
-    # migration file (no local shell access to run makemigrations), so
-    # manage.py migrate in startup.sh has nothing to apply for it and
-    # the table was never created — every request to /notifications/
-    # was 500-ing on a missing table. Created here directly, matching
-    # exactly what Django would have generated from the model:
+    # ── provider extended profile fields ─────────────────────────────────────
+    cursor.execute("ALTER TABLE provider_healthcareprovider ADD COLUMN IF NOT EXISTS national_id_number varchar(50) NOT NULL DEFAULT '';")
+    cursor.execute("ALTER TABLE provider_healthcareprovider ADD COLUMN IF NOT EXISTS national_id_image varchar(500) NOT NULL DEFAULT '';")
+    cursor.execute("ALTER TABLE provider_healthcareprovider ADD COLUMN IF NOT EXISTS clinic_logo_url varchar(500) NOT NULL DEFAULT '';")
+    cursor.execute("ALTER TABLE provider_healthcareprovider ADD COLUMN IF NOT EXISTS business_reg_number varchar(100) NOT NULL DEFAULT '';")
+    cursor.execute("ALTER TABLE provider_healthcareprovider ADD COLUMN IF NOT EXISTS business_reg_image varchar(500) NOT NULL DEFAULT '';")
+    cursor.execute("ALTER TABLE provider_healthcareprovider ADD COLUMN IF NOT EXISTS operating_licence varchar(100) NOT NULL DEFAULT '';")
+    cursor.execute("ALTER TABLE provider_healthcareprovider ADD COLUMN IF NOT EXISTS operating_licence_image varchar(500) NOT NULL DEFAULT '';")
+    cursor.execute("ALTER TABLE provider_healthcareprovider ADD COLUMN IF NOT EXISTS kra_pin varchar(50) NOT NULL DEFAULT '';")
+    cursor.execute("ALTER TABLE provider_healthcareprovider ADD COLUMN IF NOT EXISTS kra_pin_image varchar(500) NOT NULL DEFAULT '';")
+    cursor.execute("ALTER TABLE provider_healthcareprovider ADD COLUMN IF NOT EXISTS cr12_image varchar(500) NOT NULL DEFAULT '';")
+    cursor.execute("ALTER TABLE provider_healthcareprovider ADD COLUMN IF NOT EXISTS valid_licence_number varchar(100) NOT NULL DEFAULT '';")
+    cursor.execute("ALTER TABLE provider_healthcareprovider ADD COLUMN IF NOT EXISTS valid_licence_image varchar(500) NOT NULL DEFAULT '';")
+    cursor.execute("ALTER TABLE provider_healthcareprovider ADD COLUMN IF NOT EXISTS extra_credentials jsonb NOT NULL DEFAULT '[]';")
+
+    # ── provider_service.price must allow NULL ───────────────────────────────
+    # Providers can leave price blank when it's negotiable instead of fixed
+    # (frontend now sends null for an empty price field). The column was
+    # created NOT NULL by the original migration, so without this the
+    # insert/update fails at the database level even though the Django model
+    # and frontend already treat it as optional.
+    cursor.execute(
+        "ALTER TABLE provider_service ALTER COLUMN price DROP NOT NULL;"
+    )
+
+    # ── notifications_notification table ─────────────────────────────────────
+    # The notifications app's model was never given a real Django migration
+    # file (no local shell access to run makemigrations), so manage.py migrate
+    # in startup.sh has nothing to apply for it and the table was never
+    # created — every request to /notifications/ was 500-ing on a missing
+    # table. Created here directly, matching exactly what Django would have
+    # generated from the model:
     #   - id: UUID primary key (BaseModel)
     #   - recipient_identity_id: UUID FK -> identity_identity.id
     #   - created_at / updated_at: BaseModel timestamps
@@ -81,16 +111,6 @@ with connection.cursor() as cursor:
         CREATE INDEX IF NOT EXISTS notifications_notification_created_at_idx
         ON notifications_notification (created_at);
         """
-    )
-
-    # ── provider_service.price must allow NULL ───────────────────────────
-    # Providers can leave price blank when it's negotiable instead of
-    # fixed (frontend now sends null for an empty price field). The
-    # column was created NOT NULL by the original migration, so without
-    # this the insert/update fails at the database level even though the
-    # Django model and frontend already treat it as optional.
-    cursor.execute(
-        "ALTER TABLE provider_service ALTER COLUMN price DROP NOT NULL;"
     )
 
 print("Schema updated successfully")
