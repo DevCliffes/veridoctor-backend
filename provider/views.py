@@ -1,3 +1,4 @@
+import os
 from .models import (
     HealthcareProvider,
     Service,
@@ -20,6 +21,16 @@ from datetime import date, datetime, timedelta
 from django.utils import timezone as dj_timezone
 from appointments.models import ProviderAppointment
 from records.services import find_identity_by_email, refresh_record_summary
+
+ALLOWED_DOCUMENT_FIELDS = [
+    "national_id_image",
+    "clinic_logo_url",
+    "business_reg_image",
+    "operating_licence_image",
+    "kra_pin_image",
+    "cr12_image",
+    "valid_licence_image",
+]
 
 
 class ProviderProfileView(APIView):
@@ -48,6 +59,20 @@ class ProviderProfileView(APIView):
             "insurances_accepted": provider.insurances_accepted or [],
             "languages": provider.languages or ["English"],
             "profile_picture_url": provider.profile_picture_url or "",
+            # extended fields
+            "national_id_number": getattr(provider, "national_id_number", "") or "",
+            "national_id_image": getattr(provider, "national_id_image", "") or "",
+            "clinic_logo_url": getattr(provider, "clinic_logo_url", "") or "",
+            "business_reg_number": getattr(provider, "business_reg_number", "") or "",
+            "business_reg_image": getattr(provider, "business_reg_image", "") or "",
+            "operating_licence": getattr(provider, "operating_licence", "") or "",
+            "operating_licence_image": getattr(provider, "operating_licence_image", "") or "",
+            "kra_pin": getattr(provider, "kra_pin", "") or "",
+            "kra_pin_image": getattr(provider, "kra_pin_image", "") or "",
+            "cr12_image": getattr(provider, "cr12_image", "") or "",
+            "valid_licence_number": getattr(provider, "valid_licence_number", "") or "",
+            "valid_licence_image": getattr(provider, "valid_licence_image", "") or "",
+            "extra_credentials": getattr(provider, "extra_credentials", []) or [],
         })
 
     def patch(self, request, identity_id):
@@ -67,12 +92,130 @@ class ProviderProfileView(APIView):
             "speciality", "phone_number", "licence_number", "licence_type",
             "title", "clinic_name", "address", "county", "country",
             "bio", "insurances_accepted", "languages", "profile_picture_url",
+            "national_id_number", "national_id_image",
+            "clinic_logo_url",
+            "business_reg_number", "business_reg_image",
+            "operating_licence", "operating_licence_image",
+            "kra_pin", "kra_pin_image",
+            "cr12_image",
+            "valid_licence_number", "valid_licence_image",
+            "extra_credentials",
         ]:
             if field in request.data:
                 setattr(provider, field, request.data[field])
         provider.save()
 
         return Response({"success": True})
+
+
+class ProviderDocumentUploadView(APIView):
+    """
+    Uploads a document image to Cloudinary and saves the URL to a named field
+    on the provider profile.
+
+    POST /provider/<identity_id>/document?field=<field_name>
+    Body: multipart/form-data with a "file" field.
+    """
+    def post(self, request, identity_id):
+        import cloudinary
+        import cloudinary.uploader
+
+        field_name = request.query_params.get("field")
+        if not field_name or field_name not in ALLOWED_DOCUMENT_FIELDS:
+            return Response(
+                {"error": f"Invalid field. Allowed: {', '.join(ALLOWED_DOCUMENT_FIELDS)}"},
+                status=status.HTTP_400_BAD_REQUEST,
+            )
+
+        try:
+            identity = Identity.objects.get(id=identity_id)
+            provider, _ = HealthcareProvider.objects.get_or_create(identity=identity)
+        except Identity.DoesNotExist:
+            return Response({"error": "Provider not found"}, status=status.HTTP_404_NOT_FOUND)
+
+        file = request.FILES.get("file")
+        if not file:
+            return Response({"error": "No file provided"}, status=status.HTTP_400_BAD_REQUEST)
+
+        cloud_name = os.environ.get("CLOUDINARY_CLOUD_NAME")
+        api_key = os.environ.get("CLOUDINARY_API_KEY")
+        api_secret = os.environ.get("CLOUDINARY_API_SECRET")
+
+        if not all([cloud_name, api_key, api_secret]):
+            return Response({"error": "Cloudinary not configured"}, status=status.HTTP_500_INTERNAL_SERVER_ERROR)
+
+        cloudinary.config(cloud_name=cloud_name, api_key=api_key, api_secret=api_secret, secure=True)
+
+        try:
+            result = cloudinary.uploader.upload(
+                file,
+                folder="veridoctor/provider_documents",
+                public_id=f"{identity_id}_{field_name}",
+                overwrite=True,
+                resource_type="auto",
+            )
+        except Exception as e:
+            return Response({"error": f"Upload failed: {str(e)}"}, status=status.HTTP_502_BAD_GATEWAY)
+
+        url = result.get("secure_url")
+        if not url:
+            return Response({"error": "No URL returned from Cloudinary"}, status=status.HTTP_502_BAD_GATEWAY)
+
+        setattr(provider, field_name, url)
+        provider.save(update_fields=[field_name])
+
+        return Response({"url": url}, status=status.HTTP_200_OK)
+
+
+class ProviderGenericImageUploadView(APIView):
+    """
+    Uploads an image to Cloudinary and returns the URL without saving it
+    to a specific field. Used for dynamic uploads like extra credentials.
+
+    POST /provider/<identity_id>/upload-image
+    Body: multipart/form-data with a "file" field.
+    Optional query param: label (used as Cloudinary public_id suffix)
+    """
+    def post(self, request, identity_id):
+        import cloudinary
+        import cloudinary.uploader
+        import uuid
+
+        try:
+            Identity.objects.get(id=identity_id)
+        except Identity.DoesNotExist:
+            return Response({"error": "Provider not found"}, status=status.HTTP_404_NOT_FOUND)
+
+        file = request.FILES.get("file")
+        if not file:
+            return Response({"error": "No file provided"}, status=status.HTTP_400_BAD_REQUEST)
+
+        cloud_name = os.environ.get("CLOUDINARY_CLOUD_NAME")
+        api_key = os.environ.get("CLOUDINARY_API_KEY")
+        api_secret = os.environ.get("CLOUDINARY_API_SECRET")
+
+        if not all([cloud_name, api_key, api_secret]):
+            return Response({"error": "Cloudinary not configured"}, status=status.HTTP_500_INTERNAL_SERVER_ERROR)
+
+        cloudinary.config(cloud_name=cloud_name, api_key=api_key, api_secret=api_secret, secure=True)
+
+        label = request.query_params.get("label", str(uuid.uuid4())[:8])
+        try:
+            result = cloudinary.uploader.upload(
+                file,
+                folder="veridoctor/provider_credentials",
+                public_id=f"{identity_id}_cred_{label}",
+                overwrite=True,
+                resource_type="image",
+            )
+        except Exception as e:
+            return Response({"error": str(e)}, status=status.HTTP_502_BAD_GATEWAY)
+
+        url = result.get("secure_url")
+        if not url:
+            return Response({"error": "No URL returned"}, status=status.HTTP_502_BAD_GATEWAY)
+
+        return Response({"url": url}, status=status.HTTP_200_OK)
 
 
 class ServiceView(APIView):
@@ -329,6 +472,7 @@ class ProviderListView(APIView):
                 "languages": p.languages or [],
                 "insurances_accepted": p.insurances_accepted or [],
                 "profile_picture_url": p.profile_picture_url or "",
+                "clinic_logo_url": getattr(p, "clinic_logo_url", "") or "",
                 "services": services,
             })
         return Response(data)
@@ -360,6 +504,7 @@ class ProviderPublicProfileView(APIView):
             "languages": provider.languages or [],
             "insurances_accepted": provider.insurances_accepted or [],
             "profile_picture_url": provider.profile_picture_url or "",
+            "clinic_logo_url": getattr(provider, "clinic_logo_url", "") or "",
             "services": services,
         })
 
@@ -452,30 +597,27 @@ class PatientDetailView(APIView):
             patient_identity = Identity.objects.get(id=patient_identity_id)
         except Identity.DoesNotExist:
             return Response({"error": "Patient not found"}, status=status.HTTP_404_NOT_FOUND)
+
+        insurances = []
+        try:
+            from identity.models import patientAccount
+            account = patientAccount.objects.filter(identity=patient_identity).first()
+            if account:
+                insurances = getattr(account, "insurances", []) or []
+        except Exception:
+            pass
+
         return Response({
             "phone_number": patient_identity.phone_number or "",
             "first_name": patient_identity.first_name,
             "last_name": patient_identity.last_name,
             "email": patient_identity.email,
+            "insurances": insurances,
         })
 
 
 class ProviderPhotoUploadView(APIView):
-    """
-    Accepts a multipart image upload from the provider profile page,
-    pushes it to Cloudinary, and saves the returned secure URL onto
-    the provider's profile_picture_url field.
-
-    POST /provider/<identity_id>/photo
-    Body: multipart/form-data with a "photo" file field.
-
-    Requires these environment variables to be set on the backend:
-      CLOUDINARY_CLOUD_NAME
-      CLOUDINARY_API_KEY
-      CLOUDINARY_API_SECRET
-    """
     def post(self, request, identity_id):
-        import os
         import cloudinary
         import cloudinary.uploader
 
@@ -487,29 +629,16 @@ class ProviderPhotoUploadView(APIView):
 
         photo = request.FILES.get("photo")
         if not photo:
-            return Response(
-                {"error": "No file provided. Send multipart/form-data with a 'photo' field."},
-                status=status.HTTP_400_BAD_REQUEST,
-            )
+            return Response({"error": "No file provided."}, status=status.HTTP_400_BAD_REQUEST)
 
         cloud_name = os.environ.get("CLOUDINARY_CLOUD_NAME")
         api_key = os.environ.get("CLOUDINARY_API_KEY")
         api_secret = os.environ.get("CLOUDINARY_API_SECRET")
 
         if not all([cloud_name, api_key, api_secret]):
-            return Response(
-                {"error": "Cloudinary is not configured on the server. "
-                          "Set CLOUDINARY_CLOUD_NAME, CLOUDINARY_API_KEY, "
-                          "CLOUDINARY_API_SECRET environment variables."},
-                status=status.HTTP_500_INTERNAL_SERVER_ERROR,
-            )
+            return Response({"error": "Cloudinary not configured."}, status=status.HTTP_500_INTERNAL_SERVER_ERROR)
 
-        cloudinary.config(
-            cloud_name=cloud_name,
-            api_key=api_key,
-            api_secret=api_secret,
-            secure=True,
-        )
+        cloudinary.config(cloud_name=cloud_name, api_key=api_key, api_secret=api_secret, secure=True)
 
         try:
             result = cloudinary.uploader.upload(
@@ -520,69 +649,13 @@ class ProviderPhotoUploadView(APIView):
                 resource_type="image",
             )
         except Exception as e:
-            return Response(
-                {"error": f"Upload to Cloudinary failed: {str(e)}"},
-                status=status.HTTP_502_BAD_GATEWAY,
-            )
+            return Response({"error": f"Upload failed: {str(e)}"}, status=status.HTTP_502_BAD_GATEWAY)
 
         secure_url = result.get("secure_url")
         if not secure_url:
-            return Response(
-                {"error": "Cloudinary did not return a URL"},
-                status=status.HTTP_502_BAD_GATEWAY,
-            )
+            return Response({"error": "No URL returned"}, status=status.HTTP_502_BAD_GATEWAY)
 
         provider.profile_picture_url = secure_url
         provider.save(update_fields=["profile_picture_url"])
 
         return Response({"profile_picture_url": secure_url}, status=status.HTTP_200_OK)
-
-
-class ProviderPhotoView(APIView):
-    """
-    DEAD CODE — unreachable. ProviderPhotoUploadView is registered first
-    in urls.py for the same path ("<str:identity_id>/photo"), so Django
-    always matches that one. Kept here only because removing it isn't
-    required for correctness; safe to delete in a future cleanup pass.
-
-    Handles profile photo upload for a provider.
-    POST /provider/<identity_id>/photo
-    Accepts multipart/form-data with a 'photo' field.
-    Stores the image as base64 data URL (no external storage needed).
-    """
-    def post(self, request, identity_id):
-        import base64
-
-        try:
-            identity = Identity.objects.get(id=identity_id)
-            provider = HealthcareProvider.objects.get(identity=identity)
-        except (Identity.DoesNotExist, HealthcareProvider.DoesNotExist):
-            return Response({"error": "Provider not found"}, status=status.HTTP_404_NOT_FOUND)
-
-        photo = request.FILES.get("photo")
-        if not photo:
-            return Response({"error": "No photo file provided"}, status=status.HTTP_400_BAD_REQUEST)
-
-        allowed_types = ["image/jpeg", "image/png", "image/webp", "image/gif"]
-        if photo.content_type not in allowed_types:
-            return Response(
-                {"error": "Invalid file type. Use JPEG, PNG, WebP, or GIF."},
-                status=status.HTTP_400_BAD_REQUEST,
-            )
-
-        if photo.size > 5 * 1024 * 1024:
-            return Response(
-                {"error": "File too large. Maximum size is 5MB."},
-                status=status.HTTP_400_BAD_REQUEST,
-            )
-
-        photo_data = base64.b64encode(photo.read()).decode("utf-8")
-        data_url = f"data:{photo.content_type};base64,{photo_data}"
-
-        provider.profile_picture_url = data_url
-        provider.save(update_fields=["profile_picture_url"])
-
-        return Response(
-            {"profile_picture_url": data_url},
-            status=status.HTTP_200_OK,
-        )
