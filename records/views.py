@@ -9,10 +9,6 @@ from .serializers import PatientProviderRecordSummarySerializer
 
 
 class PatientRecordSummaryView(APIView):
-    """
-    Returns the cross-provider record summary for a patient — counts and
-    recency only, never clinical content.
-    """
     def get(self, request, patient_identity_id):
         try:
             patient_identity = Identity.objects.get(id=patient_identity_id)
@@ -45,8 +41,6 @@ class PatientTimelineView(APIView):
     Query params:
       type     — filter by record type: "consultation" or "prescription"
       provider — filter consultations to a specific provider (identity_id).
-                 Used by the provider app to fetch only their own records
-                 for a patient without needing consent.
     """
     def get(self, request, patient_identity_id):
         try:
@@ -69,9 +63,6 @@ class PatientTimelineView(APIView):
                 "provider", "provider__identity", "service"
             ).prefetch_related("captures").order_by("-start_time")
 
-            # If a provider filter is given, restrict to that provider's records only.
-            # This lets a doctor read their own past records for a patient without
-            # requiring patient consent (they already own those records).
             if provider_identity_id:
                 try:
                     provider = HealthcareProvider.objects.get(
@@ -80,6 +71,17 @@ class PatientTimelineView(APIView):
                     appointments = appointments.filter(provider=provider)
                 except HealthcareProvider.DoesNotExist:
                     appointments = appointments.none()
+
+            # Build a sensitivity map: provider_id -> sensitivity
+            sensitivity_map = {}
+            summaries = PatientProviderRecordSummary.objects.filter(
+                patient_identity=patient_identity
+            ).values("provider_id", "sensitivity", "id")
+            for s in summaries:
+                sensitivity_map[s["provider_id"]] = {
+                    "sensitivity": s["sensitivity"],
+                    "summary_id": str(s["id"]),
+                }
 
             for appt in appointments:
                 captures = []
@@ -90,6 +92,7 @@ class PatientTimelineView(APIView):
                         "values": cap.values,
                         "captured_at": cap.created_at.isoformat(),
                     })
+                provider_info = sensitivity_map.get(appt.provider_id, {})
                 records.append({
                     "id": str(appt.id),
                     "fhir_resource_type": "Encounter",
@@ -104,6 +107,9 @@ class PatientTimelineView(APIView):
                     "service_name": appt.service.name if appt.service else None,
                     "captures": captures,
                     "has_clinical_notes": len(captures) > 0,
+                    # sensitivity fields for the patient toggle
+                    "sensitivity": provider_info.get("sensitivity", "ask_first"),
+                    "summary_id": provider_info.get("summary_id"),
                 })
 
         if not record_type or record_type == "prescription":
@@ -135,6 +141,11 @@ class PatientTimelineView(APIView):
                     "diagnosis": rx.diagnosis,
                     "notes": rx.notes,
                     "drugs": drugs,
+                    # prescriptions don't have per-record sensitivity —
+                    # sensitivity is set at the provider-relationship level
+                    # on PatientProviderRecordSummary (consultation records).
+                    "sensitivity": None,
+                    "summary_id": None,
                 })
 
         records.sort(key=lambda r: r["date"], reverse=True)
@@ -147,12 +158,6 @@ class PatientTimelineView(APIView):
 
 
 class ProviderPatientSummaryView(APIView):
-    """
-    Provider-facing patient record panel shown during a consultation.
-    Returns patient profile, stats, always-visible data (allergies,
-    active meds), record categories from other providers with consent
-    status, and access grants for this consultation.
-    """
     def get(self, request, appointment_id):
         from appointments.models import ProviderAppointment
         from provider.models import Prescription
@@ -173,7 +178,6 @@ class ProviderPatientSummaryView(APIView):
 
         requesting_provider = appointment.provider
 
-        # Patient profile — from patientAccount
         try:
             from identity.models import patientAccount
             patient_acct = patientAccount.objects.get(identity=patient_identity)
@@ -185,13 +189,14 @@ class ProviderPatientSummaryView(APIView):
             )
             blood_type = patient_acct.blood_type
             allergies = patient_acct.allergies or []
+            insurances = patient_acct.insurances or []
         except Exception:
             patient_uid = None
             date_of_birth = None
             blood_type = None
             allergies = []
+            insurances = []
 
-        # Stats from PatientProviderRecordSummary
         summaries = PatientProviderRecordSummary.objects.filter(
             patient_identity=patient_identity
         ).select_related("provider", "provider__identity")
@@ -201,15 +206,12 @@ class ProviderPatientSummaryView(APIView):
         most_recent = max(last_dates).isoformat() if last_dates else None
         prior_facilities = summaries.count()
 
-        # Active medications
         active_meds = Prescription.objects.filter(
             patient_identity=patient_identity
         ).count()
 
-        # Record categories — exclude the requesting provider's own records
         other_summaries = summaries.exclude(provider=requesting_provider)
 
-        # Access grants for this specific consultation
         grants = RecordAccessGrant.objects.filter(
             appointment=appointment,
             patient_identity=patient_identity,
@@ -261,6 +263,7 @@ class ProviderPatientSummaryView(APIView):
             "always_visible": {
                 "allergies": allergies,
                 "active_medications_count": active_meds,
+                "insurances": insurances,
             },
             "record_categories": record_categories,
             "access_granted": approved_grants,
@@ -268,10 +271,6 @@ class ProviderPatientSummaryView(APIView):
 
 
 class RecordAccessRequestView(APIView):
-    """
-    Provider requests access to a patient's records for a specific category.
-    Patient is notified in the health portal and must approve.
-    """
     def post(self, request):
         from appointments.models import ProviderAppointment
 
@@ -306,7 +305,6 @@ class RecordAccessRequestView(APIView):
             defaults={"status": "pending"},
         )
 
-        # Allow re-requesting if previously denied
         if not created and grant.status == "denied":
             grant.status = "pending"
             grant.responded_at = None
@@ -323,10 +321,6 @@ class RecordAccessRequestView(APIView):
 
 
 class PatientAccessRequestsView(APIView):
-    """
-    Patient sees all access requests made against their records.
-    GET /records/patient/<patient_identity_id>/access-requests
-    """
     def get(self, request, patient_identity_id):
         try:
             patient_identity = Identity.objects.get(id=patient_identity_id)
@@ -388,4 +382,36 @@ class RecordAccessGrantDetailView(APIView):
             "id": str(grant.id),
             "status": grant.status,
             "responded_at": grant.responded_at.isoformat(),
+        })
+
+
+class PatientSensitivityView(APIView):
+    """
+    Patient updates the sensitivity setting for records from a specific
+    provider relationship (PatientProviderRecordSummary).
+
+    PATCH /records/sensitivity/<summary_id>
+    Body: { "sensitivity": "always_visible" | "ask_first" | "never" }
+    """
+    def patch(self, request, summary_id):
+        VALID = {"always_visible", "ask_first", "never"}
+        new_sensitivity = request.data.get("sensitivity")
+
+        if new_sensitivity not in VALID:
+            return Response(
+                {"error": f"sensitivity must be one of: {', '.join(VALID)}"},
+                status=status.HTTP_400_BAD_REQUEST,
+            )
+
+        try:
+            summary = PatientProviderRecordSummary.objects.get(id=summary_id)
+        except PatientProviderRecordSummary.DoesNotExist:
+            return Response({"error": "Record summary not found"}, status=status.HTTP_404_NOT_FOUND)
+
+        summary.sensitivity = new_sensitivity
+        summary.save(update_fields=["sensitivity", "updated_at"])
+
+        return Response({
+            "id": str(summary.id),
+            "sensitivity": summary.sensitivity,
         })
