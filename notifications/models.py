@@ -5,22 +5,14 @@ from shared.models import BaseModel
 class Notification(BaseModel):
     """
     A single in-app notification for a recipient (provider or patient).
-
-    Created server-side from inside existing views whenever something
-    notification-worthy happens (appointment booked/confirmed/cancelled/
-    rescheduled, prescription added, record access requested/granted).
-
-    Not a new event system — just a row written alongside whatever the
-    triggering view was already doing, so it stays simple and doesn't
-    require any new infrastructure (no websockets, no task queue).
     """
-
     NOTIFICATION_TYPE_CHOICES = [
         ("appointment_booked", "Appointment booked"),
         ("appointment_confirmed", "Appointment confirmed"),
         ("appointment_cancelled", "Appointment cancelled"),
         ("appointment_rescheduled", "Appointment rescheduled"),
         ("prescription_added", "Prescription added"),
+        ("prescription_ready", "Prescription ready"),
         ("record_access_requested", "Record access requested"),
         ("record_access_granted", "Record access granted"),
     ]
@@ -29,8 +21,7 @@ class Notification(BaseModel):
         "identity.Identity",
         on_delete=models.CASCADE,
         related_name="notifications",
-        help_text="Who this notification is for — the provider or patient "
-                   "that should see it.",
+        help_text="Who this notification is for — the provider or patient that should see it.",
     )
     notification_type = models.CharField(
         max_length=40, choices=NOTIFICATION_TYPE_CHOICES
@@ -40,8 +31,7 @@ class Notification(BaseModel):
     link = models.CharField(
         max_length=255,
         blank=True,
-        help_text="Optional relative frontend path to navigate to when "
-                   "clicked, e.g. '/appointments/<id>'.",
+        help_text="Optional relative frontend path to navigate to when clicked, e.g. '/appointments/<id>'.",
     )
     is_read = models.BooleanField(default=False)
 
