@@ -60,4 +60,55 @@ with connection.cursor() as cursor:
         "ALTER TABLE provider_service ALTER COLUMN price DROP NOT NULL;"
     )
 
+    # ── notifications_notification table ─────────────────────────────────────
+    # Table already exists (created in a previous deploy via this script).
+    # Ensure it exists, then fake the Django migration so manage.py migrate
+    # doesn't try to CREATE TABLE again and error out.
+    cursor.execute(
+        """
+        CREATE TABLE IF NOT EXISTS notifications_notification (
+            id uuid NOT NULL PRIMARY KEY,
+            created_at timestamp with time zone NOT NULL,
+            updated_at timestamp with time zone NOT NULL,
+            recipient_identity_id uuid NOT NULL REFERENCES identity_identity(id) ON DELETE CASCADE,
+            notification_type varchar(40) NOT NULL,
+            title varchar(255) NOT NULL,
+            message varchar(500) NOT NULL DEFAULT '',
+            link varchar(255) NOT NULL DEFAULT '',
+            is_read boolean NOT NULL DEFAULT false
+        );
+        """
+    )
+    cursor.execute(
+        """
+        CREATE INDEX IF NOT EXISTS notifications_notification_recipient_identity_id_idx
+        ON notifications_notification (recipient_identity_id);
+        """
+    )
+    cursor.execute(
+        """
+        CREATE INDEX IF NOT EXISTS notifications_notification_recipient_is_read_idx
+        ON notifications_notification (recipient_identity_id, is_read);
+        """
+    )
+    cursor.execute(
+        """
+        CREATE INDEX IF NOT EXISTS notifications_notification_created_at_idx
+        ON notifications_notification (created_at);
+        """
+    )
+
+    # Fake the migration so Django doesn't try to CREATE TABLE again.
+    # INSERT ... WHERE NOT EXISTS means this is safe to re-run on every deploy.
+    cursor.execute(
+        """
+        INSERT INTO django_migrations (app, name, applied)
+        SELECT 'notifications', '0001_initial', NOW()
+        WHERE NOT EXISTS (
+            SELECT 1 FROM django_migrations
+            WHERE app = 'notifications' AND name = '0001_initial'
+        );
+        """
+    )
+
 print("Schema updated successfully")
