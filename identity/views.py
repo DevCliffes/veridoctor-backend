@@ -65,7 +65,20 @@ class RegisterView(APIView):
             return Response({"error": "bad request"}, status=status.HTTP_400_BAD_REQUEST)
         identity = get_object_or_404(Identity, id=identity_id)
         serializer = IdentitySerializer(identity)
-        return Response(serializer.data, status=status.HTTP_200_OK)
+        data = serializer.data
+
+        # Attach insurances from patientAccount — the field lives there,
+        # not on Identity, so the serializer won't include it automatically.
+        insurances = []
+        try:
+            account = patientAccount.objects.filter(identity=identity).first()
+            if account:
+                insurances = account.insurances or []
+        except Exception:
+            pass
+        data["insurances"] = insurances
+
+        return Response(data, status=status.HTTP_200_OK)
 
     def post(self, request):
         if not request.data:
@@ -104,10 +117,36 @@ class RegisterView(APIView):
         if not request.data or not identity_id:
             return Response({"error": "bad request"}, status=status.HTTP_400_BAD_REQUEST)
         identity = get_object_or_404(Identity, id=identity_id)
-        serializer = IdentitySerializer(identity, data=request.data, partial=True)
+
+        # Save insurances to patientAccount if provided — strip it from the
+        # payload first so IdentitySerializer doesn't see an unknown field.
+        insurances = request.data.get("insurances", None)
+        if insurances is not None:
+            try:
+                account = patientAccount.objects.filter(identity=identity).first()
+                if account:
+                    account.insurances = insurances
+                    account.save(update_fields=["insurances"])
+            except Exception:
+                pass
+
+        # Update Identity fields (first_name, last_name, phone_number, gender etc.)
+        identity_data = {
+            k: v for k, v in request.data.items() if k != "insurances"
+        }
+        serializer = IdentitySerializer(identity, data=identity_data, partial=True)
         serializer.is_valid(raise_exception=True)
         serializer.save()
-        return Response(serializer.data, status=status.HTTP_200_OK)
+
+        # Return the updated data including insurances
+        response_data = serializer.data
+        try:
+            account = patientAccount.objects.filter(identity=identity).first()
+            response_data["insurances"] = account.insurances if account else []
+        except Exception:
+            response_data["insurances"] = []
+
+        return Response(response_data, status=status.HTTP_200_OK)
 
     def delete(self, request, identity_id):
         if not identity_id:
@@ -118,6 +157,7 @@ class RegisterView(APIView):
         identity.deleted_at = timezone.now()
         identity.save()
         return Response({}, status=status.HTTP_204_NO_CONTENT)
+
 
 class LoginView(APIView):
     def post(self, request):
