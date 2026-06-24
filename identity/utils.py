@@ -21,7 +21,7 @@ def generateAuthCode(identity: Identity) -> str:
     # remove an existing auth_code if it exists
     # assumes a user logs in twice we invalidate the previous login
     try:
-        auth_code = AuthCode.objects.get(identity=identity.id)
+        auth_code = AuthCode.objects.get(identity__id=identity.id)
         auth_code.delete()
     except AuthCode.DoesNotExist:
         pass
