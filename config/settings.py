@@ -25,8 +25,26 @@ else:
 if DEBUG:
     CORS_ALLOW_ALL_ORIGINS = True
 else:
-    CORS_ALLOWED_ORIGINS = os.getenv("FRONTEND_URLS", "").split(",")
-    CSRF_TRUSTED_ORIGINS = os.getenv("FRONTEND_URLS", "").split(",")
+    # FRONTEND_URLS env var on Render — comma-separated list of allowed origins.
+    # Example value:
+    #   https://veridoctor-client-1f6x4an5o-dev-cliffes-projects.vercel.app,https://veridoctor-client-ffs7ue4ah-dev-cliffes-projects.vercel.app
+    CORS_ALLOWED_ORIGINS = [
+        url.strip()
+        for url in os.getenv("FRONTEND_URLS", "").split(",")
+        if url.strip()
+    ]
+    CSRF_TRUSTED_ORIGINS = [
+        url.strip()
+        for url in os.getenv("FRONTEND_URLS", "").split(",")
+        if url.strip()
+    ]
+
+    # Regex that matches ANY Vercel preview deployment for this project so you
+    # never have to update FRONTEND_URLS again when Vercel generates a new URL.
+    CORS_ALLOWED_ORIGIN_REGEXES = [
+        r"^https://veridoctor-client-[a-z0-9]+-dev-cliffes-projects\.vercel\.app$",
+    ]
+
     CSRF_COOKIE_SAMESITE = "None"
     CSRF_COOKIE_DOMAIN = None
     SESSION_COOKIE_SAMESITE = "None"
