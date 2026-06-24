@@ -202,7 +202,7 @@ class TokenView(APIView):
         if auth_code is None or identity is None:
             return Response({"error": "no code and identity provided"}, status=status.HTTP_400_BAD_REQUEST)
         try:
-            temp_auth_code = AuthCode.objects.get(identity=identity)
+            temp_auth_code = AuthCode.objects.get(identity__id=identity)
         except Exception:
             return Response({"error": "an error occurred"}, status=status.HTTP_500_INTERNAL_SERVER_ERROR)
 
