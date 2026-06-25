@@ -149,8 +149,8 @@ class ProviderDocumentUploadView(APIView):
         try:
             result = cloudinary.uploader.upload(
                 file,
-                folder="veridoctor/provider_documents",
-                public_id=f"{identity_id}_{field_name}",
+                folder=f"veridoctor/providers/{identity_id}",
+                public_id=field_name,
                 overwrite=True,
                 resource_type="auto",
             )
@@ -203,8 +203,8 @@ class ProviderGenericImageUploadView(APIView):
         try:
             result = cloudinary.uploader.upload(
                 file,
-                folder="veridoctor/provider_credentials",
-                public_id=f"{identity_id}_cred_{label}",
+                folder=f"veridoctor/providers/{identity_id}",
+                public_id=f"cred_{label}",
                 overwrite=True,
                 resource_type="image",
             )
@@ -643,8 +643,8 @@ class ProviderPhotoUploadView(APIView):
         try:
             result = cloudinary.uploader.upload(
                 photo,
-                folder="veridoctor/provider_photos",
-                public_id=f"provider_{identity_id}",
+                folder=f"veridoctor/providers/{identity_id}",
+                public_id="profile_photo",
                 overwrite=True,
                 resource_type="image",
             )
