@@ -7,8 +7,11 @@ from .views import (
 )
 
 urlpatterns = [
-    # Patient-facing
+    # Patient-facing — list + create
     path("", PatientAppointmentView.as_view()),
+
+    # Patient-facing — update (cancel / reschedule)  ← THIS WAS MISSING
+    path("<uuid:appointment_id>/", PatientAppointmentView.as_view()),
 
     # Provider-facing — list + create
     path("provider/<uuid:identity_id>/appointments/", ProviderAppointmentView.as_view()),
