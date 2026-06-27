@@ -26,16 +26,6 @@ def _notify(recipient_identity, notification_type, title, message="", link=""):
 
 
 def _extract_prescription_from_capture(capture, appointment):
-    """
-    Scans a completed capture's form_snapshot and values for prescription-like
-    fields (drugs, diagnosis, notes) and auto-creates a Prescription record
-    linked to the same appointment and patient if enough data is found.
-
-    Looks for sections or fields whose label/name contains keywords:
-    'prescription', 'drug', 'medication', 'diagnosis', 'dosage'.
-
-    Returns the created Prescription or None if nothing prescription-like found.
-    """
     try:
         snapshot = capture.form_snapshot or []
         values = capture.values or {}
@@ -43,7 +33,6 @@ def _extract_prescription_from_capture(capture, appointment):
         if not snapshot or not values:
             return None
 
-        # Build a label map: field_id -> label/name
         label_map = {}
         for section in snapshot:
             for field in section.get("fields", []):
@@ -51,10 +40,8 @@ def _extract_prescription_from_capture(capture, appointment):
                 if fid:
                     label_map[fid] = (field.get("label") or field.get("name") or fid).lower()
 
-        # Keywords that signal prescription content
         PRESCRIPTION_KEYWORDS = {"prescription", "drug", "medication", "dosage", "diagnosis", "medicine"}
 
-        # Check if any field in this capture looks prescription-related
         has_prescription_content = any(
             any(kw in label for kw in PRESCRIPTION_KEYWORDS)
             for label in label_map.values()
@@ -63,7 +50,6 @@ def _extract_prescription_from_capture(capture, appointment):
         if not has_prescription_content:
             return None
 
-        # Extract diagnosis and notes from matching fields
         diagnosis_parts = []
         notes_parts = []
         drug_entries = []
@@ -80,7 +66,6 @@ def _extract_prescription_from_capture(capture, appointment):
                 notes_parts.append(str(val))
 
             elif any(kw in label for kw in ("drug", "medication", "medicine", "prescription")):
-                # val could be a list of drug objects or a plain string
                 if isinstance(val, list):
                     for item in val:
                         if isinstance(item, dict):
@@ -103,7 +88,6 @@ def _extract_prescription_from_capture(capture, appointment):
                     })
 
             elif "dosage" in label or "dose" in label:
-                # Standalone dosage field — attach to the last drug if one exists
                 if drug_entries:
                     drug_entries[-1]["dosage"] = str(val)
 
@@ -115,7 +99,6 @@ def _extract_prescription_from_capture(capture, appointment):
                 if drug_entries:
                     drug_entries[-1]["duration"] = str(val)
 
-        # Only create a prescription if there's something meaningful
         if not diagnosis_parts and not drug_entries:
             return None
 
@@ -145,7 +128,6 @@ def _extract_prescription_from_capture(capture, appointment):
                 instructions=drug["instructions"],
             )
 
-        # Notify patient a prescription is ready
         if patient_identity:
             provider_name = ""
             if provider and provider.identity:
@@ -162,7 +144,6 @@ def _extract_prescription_from_capture(capture, appointment):
         return prescription
 
     except Exception:
-        # Never crash the capture save because of prescription extraction
         return None
 
 
@@ -466,8 +447,25 @@ class AppointmentCaptureView(APIView):
         captures = AppointmentCapture.objects.filter(
             appointment_id=appointment_id
         ).order_by("-created_at")
-        serializer = AppointmentCaptureSerializer(captures, many=True)
-        return Response(serializer.data)
+
+        result = []
+        for capture in captures:
+            data = AppointmentCaptureSerializer(capture).data
+
+            # For legacy captures: if form_snapshot is empty but values has
+            # __form_snapshot__, hoist it up and persist the fix to the DB
+            # so it only runs once per capture.
+            if not data.get("form_snapshot") and isinstance(data.get("values"), dict):
+                smuggled = data["values"].get("__form_snapshot__")
+                if smuggled:
+                    data["form_snapshot"] = smuggled
+                    AppointmentCapture.objects.filter(pk=capture.pk).update(
+                        form_snapshot=smuggled
+                    )
+
+            result.append(data)
+
+        return Response(result)
 
     def post(self, request, identity_id, appointment_id):
         try:
@@ -480,17 +478,23 @@ class AppointmentCaptureView(APIView):
         data = request.data.copy()
         data["appointment"] = appointment_id
 
+        # Hoist __form_snapshot__ from values into the top-level form_snapshot
+        # field so it's stored correctly and survives form edits/deletions.
+        values = data.get("values", {})
+        if isinstance(values, dict) and "__form_snapshot__" in values:
+            smuggled = values.pop("__form_snapshot__")
+            if not data.get("form_snapshot") and smuggled:
+                data["form_snapshot"] = smuggled
+
         serializer = AppointmentCaptureSerializer(data=data)
         if not serializer.is_valid():
             return Response(serializer.errors, status=status.HTTP_400_BAD_REQUEST)
 
         capture = serializer.save(appointment=appointment)
 
-        # Refresh patient record summary
         if appointment.patient_identity:
             refresh_record_summary(appointment.patient_identity, appointment.provider)
 
-        # Auto-create prescription if the capture contains prescription-like fields
         _extract_prescription_from_capture(capture, appointment)
 
         return Response(
@@ -500,15 +504,6 @@ class AppointmentCaptureView(APIView):
 
 
 class ProviderDashboardStatsView(APIView):
-    """
-    GET /provider/<identity_id>/dashboard/stats
-
-    Returns field names that exactly match what the frontend components expect:
-      MetricsRow  → today_count, this_week_appointments, total_patients_month, avg_duration_minutes
-      PendingActions → pending_count
-      WeeklyChart    → weekly_data: [{date, day, count}]
-    """
-
     def get(self, request, identity_id):
         try:
             provider = HealthcareProvider.objects.get(identity__id=identity_id)
@@ -518,13 +513,11 @@ class ProviderDashboardStatsView(APIView):
         now = timezone.now()
         today = now.date()
 
-        # ── Today's appointments ─────────────────────────────────────────────
         today_count = ProviderAppointment.objects.filter(
             provider=provider,
             start_time__date=today,
         ).count()
 
-        # ── This week (Mon → Sun of current ISO week) ───────────────────────
         week_start = today - timedelta(days=today.weekday())
         week_end = week_start + timedelta(days=6)
         this_week_appointments = ProviderAppointment.objects.filter(
@@ -533,14 +526,12 @@ class ProviderDashboardStatsView(APIView):
             start_time__date__lte=week_end,
         ).count()
 
-        # ── Total patients this calendar month ───────────────────────────────
         month_start = today.replace(day=1)
         total_patients_month = ProviderAppointment.objects.filter(
             provider=provider,
             start_time__date__gte=month_start,
         ).count()
 
-        # ── Average consultation duration (completed only) ───────────────────
         completed_qs = ProviderAppointment.objects.filter(
             provider=provider,
             status="completed",
@@ -554,14 +545,12 @@ class ProviderDashboardStatsView(APIView):
         avg_duration = completed_qs.aggregate(avg=Avg("duration"))["avg"]
         avg_duration_minutes = round(avg_duration.total_seconds() / 60) if avg_duration else 0
 
-        # ── Pending appointments ─────────────────────────────────────────────
         pending_count = ProviderAppointment.objects.filter(
             provider=provider,
             status__in=["scheduled", "pending"],
             start_time__gte=now,
         ).count()
 
-        # ── Weekly data: last 7 days including today ─────────────────────────
         DAY_ABBR = ["Mon", "Tue", "Wed", "Thu", "Fri", "Sat", "Sun"]
         weekly_data = []
         for i in range(6, -1, -1):
