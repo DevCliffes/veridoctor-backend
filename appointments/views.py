@@ -181,6 +181,7 @@ class PatientAppointmentView(APIView):
                 "doctor_first_name": identity.first_name if identity else "",
                 "doctor_last_name": identity.last_name if identity else "",
                 "provider_id": str(provider.id) if provider else None,
+                "provider_identity_id": str(identity.id) if identity else None,
                 "patient_first_name": appt.patient_first_name,
                 "patient_last_name": appt.patient_last_name,
                 "patient_email": appt.patient_email,
@@ -452,9 +453,6 @@ class AppointmentCaptureView(APIView):
         for capture in captures:
             data = AppointmentCaptureSerializer(capture).data
 
-            # For legacy captures: if form_snapshot is empty but values has
-            # __form_snapshot__, hoist it up and persist the fix to the DB
-            # so it only runs once per capture.
             if not data.get("form_snapshot") and isinstance(data.get("values"), dict):
                 smuggled = data["values"].get("__form_snapshot__")
                 if smuggled:
@@ -478,8 +476,6 @@ class AppointmentCaptureView(APIView):
         data = request.data.copy()
         data["appointment"] = appointment_id
 
-        # Hoist __form_snapshot__ from values into the top-level form_snapshot
-        # field so it's stored correctly and survives form edits/deletions.
         values = data.get("values", {})
         if isinstance(values, dict) and "__form_snapshot__" in values:
             smuggled = values.pop("__form_snapshot__")
