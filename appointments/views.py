@@ -161,16 +161,16 @@ class PatientAppointmentView(APIView):
         now = timezone.now()
         qs = ProviderAppointment.objects.filter(
             patient_email__iexact=patient_email
-        ).select_related("provider", "provider__identity", "service").order_by("start_time")
+        ).select_related("provider", "provider__identity", "service")
 
         if filter_type == "today":
-            qs = qs.filter(start_time__date=now.date())
+            qs = qs.filter(start_time__date=now.date()).order_by("start_time")
         elif filter_type == "past":
-            qs = qs.filter(end_time__lt=now)
+            qs = qs.filter(end_time__lt=now).order_by("-start_time")
         else:
             qs = qs.filter(start_time__gte=now).exclude(
                 status__in=["cancelled", "no-show"]
-            )
+            ).order_by("start_time")
 
         data = []
         for appt in qs:
@@ -309,18 +309,19 @@ class ProviderAppointmentView(APIView):
 
         qs = ProviderAppointment.objects.filter(
             provider=provider
-        ).select_related("service").order_by("start_time")
+        ).select_related("service")
 
         if filter_type == "today":
-            qs = qs.filter(start_time__date=now.date())
+            qs = qs.filter(start_time__date=now.date()).order_by("start_time")
         elif filter_type == "past":
-            qs = qs.filter(end_time__lt=now)
+            # Most recent past appointment first.
+            qs = qs.filter(end_time__lt=now).order_by("-start_time")
         elif filter_type == "all":
-            pass
+            qs = qs.order_by("start_time")
         else:
             qs = qs.filter(start_time__gte=now).exclude(
                 status__in=["cancelled", "no-show"]
-            )
+            ).order_by("start_time")
 
         serializer = ProviderAppointmentSerializer(qs, many=True)
         return Response(serializer.data)
