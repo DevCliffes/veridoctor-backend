@@ -1,571 +1,645 @@
-from django.utils import timezone
-from django.db.models import Avg, F, ExpressionWrapper, DurationField, Count
-from datetime import timedelta
-from identity.models import Identity
-from provider.models import HealthcareProvider, Prescription, PrescriptionDrug
-from rest_framework import status
-from rest_framework.response import Response
+import os
+from .models import (
+    HealthcareProvider,
+    Service,
+    Form,
+    Prescription,
+    PrescriptionDrug,
+    ProviderSchedule,
+)
+from .serializers import (
+    ServiceSerializer,
+    FormSerializer,
+    PrescriptionSerializer,
+    ProviderScheduleSerializer,
+)
 from rest_framework.views import APIView
-from .models import ProviderAppointment, AppointmentCapture
-from .serializers import ProviderAppointmentSerializer, AppointmentCaptureSerializer
+from rest_framework.response import Response
+from rest_framework import status
+from identity.models import Identity
+from datetime import date, datetime, timedelta
+from django.utils import timezone as dj_timezone
+from appointments.models import ProviderAppointment
 from records.services import find_identity_by_email, refresh_record_summary
 
-
-def _notify(recipient_identity, notification_type, title, message="", link=""):
-    try:
-        from notifications.models import Notification
-        Notification.objects.create(
-            recipient_identity=recipient_identity,
-            notification_type=notification_type,
-            title=title,
-            message=message,
-            link=link,
-        )
-    except Exception:
-        pass
+ALLOWED_DOCUMENT_FIELDS = [
+    "national_id_image",
+    "clinic_logo_url",
+    "business_reg_image",
+    "operating_licence_image",
+    "kra_pin_image",
+    "cr12_image",
+    "valid_licence_image",
+]
 
 
-def _extract_prescription_from_capture(capture, appointment):
-    try:
-        snapshot = capture.form_snapshot or []
-        values = capture.values or {}
+class ProviderProfileView(APIView):
+    def get(self, request, identity_id):
+        try:
+            identity = Identity.objects.get(id=identity_id)
+        except Identity.DoesNotExist:
+            return Response({"error": "Identity not found"}, status=status.HTTP_404_NOT_FOUND)
 
-        if not snapshot or not values:
-            return None
+        provider, _ = HealthcareProvider.objects.get_or_create(identity=identity)
 
-        label_map = {}
-        for section in snapshot:
-            for field in section.get("fields", []):
-                fid = field.get("id")
-                if fid:
-                    label_map[fid] = (field.get("label") or field.get("name") or fid).lower()
+        return Response({
+            "first_name": identity.first_name,
+            "last_name": identity.last_name,
+            "email": identity.email,
+            "title": provider.title or "Dr.",
+            "speciality": provider.speciality or "",
+            "phone_number": provider.phone_number or identity.phone_number or "",
+            "licence_number": provider.licence_number or "",
+            "licence_type": provider.licence_type or "",
+            "clinic_name": provider.clinic_name or "",
+            "address": provider.address or "",
+            "county": provider.county or "",
+            "country": provider.country or "Kenya",
+            "bio": provider.bio or "",
+            "insurances_accepted": provider.insurances_accepted or [],
+            "languages": provider.languages or ["English"],
+            "profile_picture_url": provider.profile_picture_url or "",
+            "national_id_number": getattr(provider, "national_id_number", "") or "",
+            "national_id_image": getattr(provider, "national_id_image", "") or "",
+            "clinic_logo_url": getattr(provider, "clinic_logo_url", "") or "",
+            "business_reg_number": getattr(provider, "business_reg_number", "") or "",
+            "business_reg_image": getattr(provider, "business_reg_image", "") or "",
+            "operating_licence": getattr(provider, "operating_licence", "") or "",
+            "operating_licence_image": getattr(provider, "operating_licence_image", "") or "",
+            "kra_pin": getattr(provider, "kra_pin", "") or "",
+            "kra_pin_image": getattr(provider, "kra_pin_image", "") or "",
+            "cr12_image": getattr(provider, "cr12_image", "") or "",
+            "valid_licence_number": getattr(provider, "valid_licence_number", "") or "",
+            "valid_licence_image": getattr(provider, "valid_licence_image", "") or "",
+            "extra_credentials": getattr(provider, "extra_credentials", []) or [],
+        })
 
-        PRESCRIPTION_KEYWORDS = {"prescription", "drug", "medication", "dosage", "diagnosis", "medicine"}
+    def patch(self, request, identity_id):
+        try:
+            identity = Identity.objects.get(id=identity_id)
+        except Identity.DoesNotExist:
+            return Response({"error": "Identity not found"}, status=status.HTTP_404_NOT_FOUND)
 
-        has_prescription_content = any(
-            any(kw in label for kw in PRESCRIPTION_KEYWORDS)
-            for label in label_map.values()
-        )
+        provider, _ = HealthcareProvider.objects.get_or_create(identity=identity)
 
-        if not has_prescription_content:
-            return None
+        for field in ["first_name", "last_name"]:
+            if field in request.data:
+                setattr(identity, field, request.data[field])
+        identity.save()
 
-        diagnosis_parts = []
-        notes_parts = []
-        drug_entries = []
+        for field in [
+            "speciality", "phone_number", "licence_number", "licence_type",
+            "title", "clinic_name", "address", "county", "country",
+            "bio", "insurances_accepted", "languages", "profile_picture_url",
+            "national_id_number", "national_id_image",
+            "clinic_logo_url",
+            "business_reg_number", "business_reg_image",
+            "operating_licence", "operating_licence_image",
+            "kra_pin", "kra_pin_image",
+            "cr12_image",
+            "valid_licence_number", "valid_licence_image",
+            "extra_credentials",
+        ]:
+            if field in request.data:
+                setattr(provider, field, request.data[field])
+        provider.save()
 
-        for field_id, label in label_map.items():
-            val = values.get(field_id)
-            if not val:
-                continue
-
-            if "diagnosis" in label:
-                diagnosis_parts.append(str(val))
-
-            elif "note" in label or "comment" in label or "remark" in label:
-                notes_parts.append(str(val))
-
-            elif any(kw in label for kw in ("drug", "medication", "medicine", "prescription")):
-                if isinstance(val, list):
-                    for item in val:
-                        if isinstance(item, dict):
-                            drug_entries.append({
-                                "drug_name": item.get("drug_name") or item.get("name") or item.get("medication") or "Unknown",
-                                "dosage": item.get("dosage") or item.get("dose") or "",
-                                "frequency": item.get("frequency") or item.get("freq") or "",
-                                "duration": item.get("duration") or "",
-                                "instructions": item.get("instructions") or item.get("notes") or "",
-                            })
-                        else:
-                            drug_entries.append({
-                                "drug_name": str(item),
-                                "dosage": "", "frequency": "", "duration": "", "instructions": "",
-                            })
-                elif isinstance(val, str) and val.strip():
-                    drug_entries.append({
-                        "drug_name": val.strip(),
-                        "dosage": "", "frequency": "", "duration": "", "instructions": "",
-                    })
-
-            elif "dosage" in label or "dose" in label:
-                if drug_entries:
-                    drug_entries[-1]["dosage"] = str(val)
-
-            elif "frequency" in label or "freq" in label:
-                if drug_entries:
-                    drug_entries[-1]["frequency"] = str(val)
-
-            elif "duration" in label:
-                if drug_entries:
-                    drug_entries[-1]["duration"] = str(val)
-
-        if not diagnosis_parts and not drug_entries:
-            return None
-
-        provider = appointment.provider
-        patient_identity = appointment.patient_identity
-        patient_email = appointment.patient_email or (
-            patient_identity.email if patient_identity else ""
-        )
-        patient_name = f"{appointment.patient_first_name} {appointment.patient_last_name}".strip()
-
-        prescription = Prescription.objects.create(
-            provider=provider,
-            patient_name=patient_name,
-            patient_email=patient_email,
-            patient_identity=patient_identity,
-            diagnosis=" | ".join(diagnosis_parts),
-            notes=" | ".join(notes_parts),
-        )
-
-        for drug in drug_entries:
-            PrescriptionDrug.objects.create(
-                prescription=prescription,
-                drug_name=drug["drug_name"],
-                dosage=drug["dosage"],
-                frequency=drug["frequency"] or "As directed",
-                duration=drug["duration"] or "As directed",
-                instructions=drug["instructions"],
-            )
-
-        if patient_identity:
-            provider_name = ""
-            if provider and provider.identity:
-                pi = provider.identity
-                provider_name = f"Dr. {pi.first_name} {pi.last_name}"
-            _notify(
-                recipient_identity=patient_identity,
-                notification_type="prescription_ready",
-                title="New prescription issued",
-                message=f"{provider_name} has issued a prescription for you.",
-                link="/prescriptions",
-            )
-
-        return prescription
-
-    except Exception:
-        return None
+        return Response({"success": True})
 
 
-class PatientAppointmentView(APIView):
-    def get(self, request):
-        patient_email = request.query_params.get("patient_email")
-        filter_type = request.query_params.get("filter", "upcoming")
+class ProviderDocumentUploadView(APIView):
+    def post(self, request, identity_id):
+        import cloudinary
+        import cloudinary.uploader
 
-        if not patient_email:
+        field_name = request.query_params.get("field")
+        if not field_name or field_name not in ALLOWED_DOCUMENT_FIELDS:
             return Response(
-                {"error": "patient_email is required"},
+                {"error": f"Invalid field. Allowed: {', '.join(ALLOWED_DOCUMENT_FIELDS)}"},
                 status=status.HTTP_400_BAD_REQUEST,
             )
 
-        now = timezone.now()
-        qs = ProviderAppointment.objects.filter(
-            patient_email__iexact=patient_email
-        ).select_related("provider", "provider__identity", "service").order_by("start_time")
-
-        if filter_type == "today":
-            qs = qs.filter(start_time__date=now.date())
-        elif filter_type == "past":
-            qs = qs.filter(end_time__lt=now)
-        else:
-            qs = qs.filter(start_time__gte=now).exclude(
-                status__in=["cancelled", "no-show"]
-            )
-
-        data = []
-        for appt in qs:
-            provider = appt.provider
-            identity = provider.identity if provider else None
-            data.append({
-                "id": str(appt.id),
-                "doctor_first_name": identity.first_name if identity else "",
-                "doctor_last_name": identity.last_name if identity else "",
-                "provider_id": str(provider.id) if provider else None,
-                "provider_identity_id": str(identity.id) if identity else None,
-                "patient_first_name": appt.patient_first_name,
-                "patient_last_name": appt.patient_last_name,
-                "patient_email": appt.patient_email,
-                "patient_phone_number": appt.patient_phone_number,
-                "patient_identity": str(appt.patient_identity_id) if appt.patient_identity_id else None,
-                "appointment_type": appt.appointment_type,
-                "service": str(appt.service_id) if appt.service_id else None,
-                "service_name": appt.service.name if appt.service else None,
-                "message": appt.message,
-                "start_time": appt.start_time.isoformat(),
-                "end_time": appt.end_time.isoformat(),
-                "status": appt.status,
-                "meet_id": appt.meet_id,
-                "created_at": appt.created_at.isoformat(),
-            })
-
-        return Response(data)
-
-    def post(self, request):
-        serializer = ProviderAppointmentSerializer(data=request.data)
-        if not serializer.is_valid():
-            return Response(serializer.errors, status=status.HTTP_400_BAD_REQUEST)
-
-        appointment = serializer.save()
-
-        patient_identity = find_identity_by_email(appointment.patient_email)
-        if patient_identity:
-            appointment.patient_identity = patient_identity
-            appointment.save(update_fields=["patient_identity"])
-            refresh_record_summary(patient_identity, appointment.provider)
-
-        if appointment.provider and appointment.provider.identity:
-            provider_identity = appointment.provider.identity
-            patient_name = f"{appointment.patient_first_name} {appointment.patient_last_name}".strip()
-            _notify(
-                recipient_identity=provider_identity,
-                notification_type="appointment_booked",
-                title="New appointment booked",
-                message=f"{patient_name} booked an appointment on "
-                        f"{appointment.start_time.strftime('%d %b %Y at %H:%M')}.",
-                link=f"/appointments/{appointment.id}",
-            )
-
-        if patient_identity:
-            provider_name = ""
-            if appointment.provider and appointment.provider.identity:
-                pi = appointment.provider.identity
-                provider_name = f"Dr. {pi.first_name} {pi.last_name}"
-            _notify(
-                recipient_identity=patient_identity,
-                notification_type="appointment_booked",
-                title="Appointment confirmed",
-                message=f"Your appointment with {provider_name} on "
-                        f"{appointment.start_time.strftime('%d %b %Y at %H:%M')} is booked.",
-                link="/appointments",
-            )
-
-        return Response(
-            ProviderAppointmentSerializer(appointment).data,
-            status=status.HTTP_201_CREATED,
-        )
-
-    def patch(self, request, appointment_id):
         try:
-            appointment = ProviderAppointment.objects.select_related(
-                "provider", "provider__identity", "patient_identity"
-            ).get(id=appointment_id)
-        except ProviderAppointment.DoesNotExist:
-            return Response({"error": "Appointment not found"}, status=status.HTTP_404_NOT_FOUND)
-
-        old_status = appointment.status
-        serializer = ProviderAppointmentSerializer(
-            appointment, data=request.data, partial=True
-        )
-        if not serializer.is_valid():
-            return Response(serializer.errors, status=status.HTTP_400_BAD_REQUEST)
-
-        updated = serializer.save()
-        new_status = updated.status
-
-        patient_identity = updated.patient_identity
-        provider_name = ""
-        if updated.provider and updated.provider.identity:
-            pi = updated.provider.identity
-            provider_name = f"Dr. {pi.first_name} {pi.last_name}"
-
-        if patient_identity and new_status != old_status:
-            if new_status == "confirmed":
-                _notify(
-                    recipient_identity=patient_identity,
-                    notification_type="appointment_confirmed",
-                    title="Appointment confirmed",
-                    message=f"Your appointment with {provider_name} has been confirmed.",
-                    link="/appointments",
-                )
-            elif new_status == "cancelled":
-                _notify(
-                    recipient_identity=patient_identity,
-                    notification_type="appointment_cancelled",
-                    title="Appointment cancelled",
-                    message=f"Your appointment with {provider_name} has been cancelled.",
-                    link="/appointments",
-                )
-            elif new_status == "rescheduled":
-                _notify(
-                    recipient_identity=patient_identity,
-                    notification_type="appointment_rescheduled",
-                    title="Appointment rescheduled",
-                    message=f"Your appointment with {provider_name} has been rescheduled.",
-                    link="/appointments",
-                )
-
-        return Response(ProviderAppointmentSerializer(updated).data)
-
-
-class ProviderAppointmentView(APIView):
-    def get(self, request, identity_id):
-        filter_type = request.query_params.get("filter", "upcoming")
-        now = timezone.now()
-
-        try:
-            provider = HealthcareProvider.objects.get(identity__id=identity_id)
-        except HealthcareProvider.DoesNotExist:
+            identity = Identity.objects.get(id=identity_id)
+            provider, _ = HealthcareProvider.objects.get_or_create(identity=identity)
+        except Identity.DoesNotExist:
             return Response({"error": "Provider not found"}, status=status.HTTP_404_NOT_FOUND)
 
-        qs = ProviderAppointment.objects.filter(
-            provider=provider
-        ).select_related("service").order_by("start_time")
+        file = request.FILES.get("file")
+        if not file:
+            return Response({"error": "No file provided"}, status=status.HTTP_400_BAD_REQUEST)
 
-        if filter_type == "today":
-            qs = qs.filter(start_time__date=now.date())
-        elif filter_type == "past":
-            qs = qs.filter(end_time__lt=now)
-        elif filter_type == "all":
-            pass
-        else:
-            qs = qs.filter(start_time__gte=now).exclude(
-                status__in=["cancelled", "no-show"]
+        cloud_name = os.environ.get("CLOUDINARY_CLOUD_NAME")
+        api_key = os.environ.get("CLOUDINARY_API_KEY")
+        api_secret = os.environ.get("CLOUDINARY_API_SECRET")
+
+        if not all([cloud_name, api_key, api_secret]):
+            return Response({"error": "Cloudinary not configured"}, status=status.HTTP_500_INTERNAL_SERVER_ERROR)
+
+        cloudinary.config(cloud_name=cloud_name, api_key=api_key, api_secret=api_secret, secure=True)
+
+        try:
+            result = cloudinary.uploader.upload(
+                file,
+                folder=f"veridoctor/providers/{identity_id}",
+                public_id=field_name,
+                overwrite=True,
+                resource_type="auto",
             )
+        except Exception as e:
+            return Response({"error": f"Upload failed: {str(e)}"}, status=status.HTTP_502_BAD_GATEWAY)
 
-        serializer = ProviderAppointmentSerializer(qs, many=True)
-        return Response(serializer.data)
+        url = result.get("secure_url")
+        if not url:
+            return Response({"error": "No URL returned from Cloudinary"}, status=status.HTTP_502_BAD_GATEWAY)
+
+        setattr(provider, field_name, url)
+        provider.save(update_fields=[field_name])
+
+        return Response({"url": url}, status=status.HTTP_200_OK)
+
+
+class ProviderGenericImageUploadView(APIView):
+    def post(self, request, identity_id):
+        import cloudinary
+        import cloudinary.uploader
+        import uuid
+
+        try:
+            Identity.objects.get(id=identity_id)
+        except Identity.DoesNotExist:
+            return Response({"error": "Provider not found"}, status=status.HTTP_404_NOT_FOUND)
+
+        file = request.FILES.get("file")
+        if not file:
+            return Response({"error": "No file provided"}, status=status.HTTP_400_BAD_REQUEST)
+
+        cloud_name = os.environ.get("CLOUDINARY_CLOUD_NAME")
+        api_key = os.environ.get("CLOUDINARY_API_KEY")
+        api_secret = os.environ.get("CLOUDINARY_API_SECRET")
+
+        if not all([cloud_name, api_key, api_secret]):
+            return Response({"error": "Cloudinary not configured"}, status=status.HTTP_500_INTERNAL_SERVER_ERROR)
+
+        cloudinary.config(cloud_name=cloud_name, api_key=api_key, api_secret=api_secret, secure=True)
+
+        label = request.query_params.get("label", str(uuid.uuid4())[:8])
+        try:
+            result = cloudinary.uploader.upload(
+                file,
+                folder=f"veridoctor/providers/{identity_id}",
+                public_id=f"cred_{label}",
+                overwrite=True,
+                resource_type="image",
+            )
+        except Exception as e:
+            return Response({"error": str(e)}, status=status.HTTP_502_BAD_GATEWAY)
+
+        url = result.get("secure_url")
+        if not url:
+            return Response({"error": "No URL returned"}, status=status.HTTP_502_BAD_GATEWAY)
+
+        return Response({"url": url}, status=status.HTTP_200_OK)
+
+
+class ServiceView(APIView):
+    def get(self, request, identity_id):
+        try:
+            identity = Identity.objects.get(id=identity_id)
+            provider = HealthcareProvider.objects.get(identity=identity)
+            services = Service.objects.filter(provider=provider)
+            serializer = ServiceSerializer(services, many=True)
+            return Response(serializer.data, status=status.HTTP_200_OK)
+        except (Identity.DoesNotExist, HealthcareProvider.DoesNotExist):
+            return Response({"error": "Provider not found"}, status=status.HTTP_404_NOT_FOUND)
 
     def post(self, request, identity_id):
         try:
-            provider = HealthcareProvider.objects.get(identity__id=identity_id)
-        except HealthcareProvider.DoesNotExist:
+            identity = Identity.objects.get(id=identity_id)
+            provider, _ = HealthcareProvider.objects.get_or_create(identity=identity)
+            serializer = ServiceSerializer(data=request.data)
+            if serializer.is_valid():
+                serializer.save(provider=provider)
+                return Response(serializer.data, status=status.HTTP_201_CREATED)
+            return Response(serializer.errors, status=status.HTTP_400_BAD_REQUEST)
+        except Identity.DoesNotExist:
+            return Response({"error": "Identity not found"}, status=status.HTTP_404_NOT_FOUND)
+
+
+class ServiceDetailView(APIView):
+    def patch(self, request, identity_id, service_id):
+        try:
+            service = Service.objects.get(id=service_id)
+            serializer = ServiceSerializer(service, data=request.data, partial=True)
+            if serializer.is_valid():
+                serializer.save()
+                return Response(serializer.data, status=status.HTTP_200_OK)
+            return Response(serializer.errors, status=status.HTTP_400_BAD_REQUEST)
+        except Service.DoesNotExist:
+            return Response({"error": "Service not found"}, status=status.HTTP_404_NOT_FOUND)
+
+    def delete(self, request, identity_id, service_id):
+        try:
+            service = Service.objects.get(id=service_id)
+            service.delete()
+            return Response(status=status.HTTP_204_NO_CONTENT)
+        except Service.DoesNotExist:
+            return Response({"error": "Service not found"}, status=status.HTTP_404_NOT_FOUND)
+
+
+class FormView(APIView):
+    def get(self, request, identity_id):
+        try:
+            identity = Identity.objects.get(id=identity_id)
+            provider = HealthcareProvider.objects.get(identity=identity)
+            forms = Form.objects.filter(provider=provider)
+            serializer = FormSerializer(forms, many=True)
+            return Response(serializer.data, status=status.HTTP_200_OK)
+        except (Identity.DoesNotExist, HealthcareProvider.DoesNotExist):
             return Response({"error": "Provider not found"}, status=status.HTTP_404_NOT_FOUND)
 
-        data = request.data.copy()
-        data["provider"] = provider.id
-
-        serializer = ProviderAppointmentSerializer(data=data)
-        if not serializer.is_valid():
+    def post(self, request, identity_id):
+        try:
+            identity = Identity.objects.get(id=identity_id)
+            provider, _ = HealthcareProvider.objects.get_or_create(identity=identity)
+            serializer = FormSerializer(data=request.data)
+            if serializer.is_valid():
+                serializer.save(provider=provider)
+                return Response(serializer.data, status=status.HTTP_201_CREATED)
             return Response(serializer.errors, status=status.HTTP_400_BAD_REQUEST)
+        except Identity.DoesNotExist:
+            return Response({"error": "Identity not found"}, status=status.HTTP_404_NOT_FOUND)
 
-        appointment = serializer.save(provider=provider)
 
-        patient_identity = find_identity_by_email(appointment.patient_email)
-        if patient_identity:
-            appointment.patient_identity = patient_identity
-            appointment.save(update_fields=["patient_identity"])
-            refresh_record_summary(patient_identity, provider)
+class FormDetailView(APIView):
+    def get(self, request, identity_id, form_id):
+        try:
+            form = Form.objects.get(id=form_id)
+            serializer = FormSerializer(form)
+            return Response(serializer.data, status=status.HTTP_200_OK)
+        except Form.DoesNotExist:
+            return Response({"error": "Form not found"}, status=status.HTTP_404_NOT_FOUND)
 
-            provider_name = f"Dr. {provider.identity.first_name} {provider.identity.last_name}"
-            _notify(
-                recipient_identity=patient_identity,
-                notification_type="appointment_booked",
-                title="Appointment scheduled",
-                message=f"{provider_name} has scheduled an appointment for you on "
-                        f"{appointment.start_time.strftime('%d %b %Y at %H:%M')}.",
-                link="/appointments",
+    def patch(self, request, identity_id, form_id):
+        try:
+            form = Form.objects.get(id=form_id)
+            serializer = FormSerializer(form, data=request.data, partial=True)
+            if serializer.is_valid():
+                serializer.save()
+                return Response(serializer.data, status=status.HTTP_200_OK)
+            return Response(serializer.errors, status=status.HTTP_400_BAD_REQUEST)
+        except Form.DoesNotExist:
+            return Response({"error": "Form not found"}, status=status.HTTP_404_NOT_FOUND)
+
+    def delete(self, request, identity_id, form_id):
+        try:
+            form = Form.objects.get(id=form_id)
+            form.delete()
+            return Response(status=status.HTTP_204_NO_CONTENT)
+        except Form.DoesNotExist:
+            return Response({"error": "Form not found"}, status=status.HTTP_404_NOT_FOUND)
+
+
+class PrescriptionView(APIView):
+    def get(self, request, identity_id):
+        try:
+            identity = Identity.objects.get(id=identity_id)
+            provider = HealthcareProvider.objects.get(identity=identity)
+            prescriptions = Prescription.objects.filter(provider=provider).order_by("-created_at")
+            serializer = PrescriptionSerializer(prescriptions, many=True)
+            return Response(serializer.data, status=status.HTTP_200_OK)
+        except (Identity.DoesNotExist, HealthcareProvider.DoesNotExist):
+            return Response({"error": "Provider not found"}, status=status.HTTP_404_NOT_FOUND)
+
+    def post(self, request, identity_id):
+        try:
+            identity = Identity.objects.get(id=identity_id)
+            provider, _ = HealthcareProvider.objects.get_or_create(identity=identity)
+            patient_identity = find_identity_by_email(request.data.get("patient_email"))
+            prescription = Prescription.objects.create(
+                provider=provider,
+                patient_id=request.data.get("patient_id", ""),
+                patient_name=request.data.get("patient_name", ""),
+                patient_email=request.data.get("patient_email", ""),
+                patient_identity=patient_identity,
+                diagnosis=request.data.get("diagnosis", ""),
+                notes=request.data.get("notes", ""),
             )
+            for drug in request.data.get("drugs", []):
+                PrescriptionDrug.objects.create(
+                    prescription=prescription,
+                    drug_name=drug.get("drug_name", ""),
+                    dosage=drug.get("dosage", ""),
+                    frequency=drug.get("frequency", ""),
+                    duration=drug.get("duration", ""),
+                    instructions=drug.get("instructions", ""),
+                )
+            refresh_record_summary(patient_identity, provider)
+            serializer = PrescriptionSerializer(prescription)
+            return Response(serializer.data, status=status.HTTP_201_CREATED)
+        except Identity.DoesNotExist:
+            return Response({"error": "Identity not found"}, status=status.HTTP_404_NOT_FOUND)
 
-        return Response(
-            ProviderAppointmentSerializer(appointment).data,
-            status=status.HTTP_201_CREATED,
-        )
 
-
-class ProviderAppointmentDetailView(APIView):
-    def get(self, request, identity_id, appointment_id):
+class PrescriptionDetailView(APIView):
+    def get(self, request, identity_id, prescription_id):
         try:
-            appointment = ProviderAppointment.objects.select_related(
-                "service", "patient_identity"
-            ).get(id=appointment_id)
-        except ProviderAppointment.DoesNotExist:
-            return Response({"error": "Not found"}, status=status.HTTP_404_NOT_FOUND)
+            prescription = Prescription.objects.get(id=prescription_id)
+            serializer = PrescriptionSerializer(prescription)
+            return Response(serializer.data, status=status.HTTP_200_OK)
+        except Prescription.DoesNotExist:
+            return Response({"error": "Prescription not found"}, status=status.HTTP_404_NOT_FOUND)
 
-        return Response(ProviderAppointmentSerializer(appointment).data)
-
-    def patch(self, request, identity_id, appointment_id):
+    def delete(self, request, identity_id, prescription_id):
         try:
-            appointment = ProviderAppointment.objects.select_related(
-                "provider", "provider__identity", "patient_identity"
-            ).get(id=appointment_id)
-        except ProviderAppointment.DoesNotExist:
-            return Response({"error": "Not found"}, status=status.HTTP_404_NOT_FOUND)
+            prescription = Prescription.objects.get(id=prescription_id)
+            prescription.delete()
+            return Response(status=status.HTTP_204_NO_CONTENT)
+        except Prescription.DoesNotExist:
+            return Response({"error": "Prescription not found"}, status=status.HTTP_404_NOT_FOUND)
 
-        old_status = appointment.status
-        serializer = ProviderAppointmentSerializer(
-            appointment, data=request.data, partial=True
-        )
-        if not serializer.is_valid():
-            return Response(serializer.errors, status=status.HTTP_400_BAD_REQUEST)
 
-        updated = serializer.save()
-        new_status = updated.status
+class PatientPrescriptionView(APIView):
+    def get(self, request):
+        patient_email = request.query_params.get("patient_email")
+        if not patient_email:
+            return Response({"error": "patient_email query param required"}, status=status.HTTP_400_BAD_REQUEST)
+        prescriptions = Prescription.objects.filter(patient_email=patient_email).order_by("-created_at")
+        serializer = PrescriptionSerializer(prescriptions, many=True)
+        return Response(serializer.data, status=status.HTTP_200_OK)
 
-        patient_identity = updated.patient_identity
-        provider_name = ""
-        if updated.provider and updated.provider.identity:
-            pi = updated.provider.identity
-            provider_name = f"Dr. {pi.first_name} {pi.last_name}"
 
-        if patient_identity and new_status != old_status:
-            if new_status == "confirmed":
-                _notify(
-                    recipient_identity=patient_identity,
-                    notification_type="appointment_confirmed",
-                    title="Appointment confirmed",
-                    message=f"Your appointment with {provider_name} has been confirmed.",
-                    link="/appointments",
-                )
-            elif new_status == "cancelled":
-                _notify(
-                    recipient_identity=patient_identity,
-                    notification_type="appointment_cancelled",
-                    title="Appointment cancelled",
-                    message=f"Your appointment with {provider_name} has been cancelled.",
-                    link="/appointments",
-                )
-            elif new_status == "rescheduled":
-                _notify(
-                    recipient_identity=patient_identity,
-                    notification_type="appointment_rescheduled",
-                    title="Appointment rescheduled",
-                    message=f"Your appointment with {provider_name} has been rescheduled.",
-                    link="/appointments",
-                )
-            elif new_status == "in-progress":
-                _notify(
-                    recipient_identity=patient_identity,
-                    notification_type="appointment_confirmed",
-                    title="Your consultation has started",
-                    message=f"Your consultation with {provider_name} is now in progress.",
-                    link="/appointments",
-                )
-
-        return Response(ProviderAppointmentSerializer(updated).data)
-
-    def delete(self, request, identity_id, appointment_id):
+class ProviderScheduleView(APIView):
+    def get(self, request, identity_id):
         try:
-            appointment = ProviderAppointment.objects.get(id=appointment_id)
-        except ProviderAppointment.DoesNotExist:
-            return Response({"error": "Not found"}, status=status.HTTP_404_NOT_FOUND)
+            identity = Identity.objects.get(id=identity_id)
+            provider = HealthcareProvider.objects.get(identity=identity)
+        except (Identity.DoesNotExist, HealthcareProvider.DoesNotExist):
+            return Response({"error": "Provider not found"}, status=status.HTTP_404_NOT_FOUND)
+        schedules = ProviderSchedule.objects.filter(provider=provider).order_by("start_date", "start_time")
+        serializer = ProviderScheduleSerializer(schedules, many=True)
+        return Response(serializer.data, status=status.HTTP_200_OK)
 
-        appointment.delete()
+    def post(self, request, identity_id):
+        try:
+            identity = Identity.objects.get(id=identity_id)
+            provider, _ = HealthcareProvider.objects.get_or_create(identity=identity)
+        except Identity.DoesNotExist:
+            return Response({"error": "Identity not found"}, status=status.HTTP_404_NOT_FOUND)
+        data = request.data.copy()
+        if (
+            data.get("recurrence", "none") != "none"
+            and data.get("recurrence_end_type") in (None, "never", "")
+        ):
+            data["end_date"] = "2099-12-31"
+        serializer = ProviderScheduleSerializer(data=data)
+        if serializer.is_valid():
+            serializer.save(provider=provider)
+            return Response(serializer.data, status=status.HTTP_201_CREATED)
+        return Response(serializer.errors, status=status.HTTP_400_BAD_REQUEST)
+
+
+class ProviderScheduleDetailView(APIView):
+    def patch(self, request, identity_id, schedule_id):
+        try:
+            schedule = ProviderSchedule.objects.get(id=schedule_id)
+        except ProviderSchedule.DoesNotExist:
+            return Response({"error": "Schedule not found"}, status=status.HTTP_404_NOT_FOUND)
+        data = request.data.copy()
+        effective_recurrence = data.get("recurrence", schedule.recurrence)
+        effective_end_type = data.get("recurrence_end_type", schedule.recurrence_end_type)
+        if effective_recurrence != "none" and effective_end_type in (None, "never", ""):
+            data["end_date"] = "2099-12-31"
+        serializer = ProviderScheduleSerializer(schedule, data=data, partial=True)
+        if serializer.is_valid():
+            serializer.save()
+            return Response(serializer.data, status=status.HTTP_200_OK)
+        return Response(serializer.errors, status=status.HTTP_400_BAD_REQUEST)
+
+    def delete(self, request, identity_id, schedule_id):
+        try:
+            schedule = ProviderSchedule.objects.get(id=schedule_id)
+        except ProviderSchedule.DoesNotExist:
+            return Response({"error": "Schedule not found"}, status=status.HTTP_404_NOT_FOUND)
+        occurrence_date = request.query_params.get("occurrence_date")
+        delete_series = request.query_params.get("delete_series") == "true"
+        if schedule.recurrence != "none" and occurrence_date and not delete_series:
+            excluded = schedule.excluded_dates or []
+            if occurrence_date not in excluded:
+                excluded.append(occurrence_date)
+            schedule.excluded_dates = excluded
+            schedule.save(update_fields=["excluded_dates"])
+            return Response(ProviderScheduleSerializer(schedule).data, status=status.HTTP_200_OK)
+        schedule.delete()
         return Response(status=status.HTTP_204_NO_CONTENT)
 
 
-class AppointmentCaptureView(APIView):
-    def get(self, request, identity_id, appointment_id):
-        captures = AppointmentCapture.objects.filter(
-            appointment_id=appointment_id
-        ).order_by("-created_at")
-
-        result = []
-        for capture in captures:
-            data = AppointmentCaptureSerializer(capture).data
-
-            if not data.get("form_snapshot") and isinstance(data.get("values"), dict):
-                smuggled = data["values"].get("__form_snapshot__")
-                if smuggled:
-                    data["form_snapshot"] = smuggled
-                    AppointmentCapture.objects.filter(pk=capture.pk).update(
-                        form_snapshot=smuggled
-                    )
-
-            result.append(data)
-
-        return Response(result)
-
-    def post(self, request, identity_id, appointment_id):
-        try:
-            appointment = ProviderAppointment.objects.select_related(
-                "provider", "provider__identity", "patient_identity"
-            ).get(id=appointment_id)
-        except ProviderAppointment.DoesNotExist:
-            return Response({"error": "Appointment not found"}, status=status.HTTP_404_NOT_FOUND)
-
-        data = request.data.copy()
-        data["appointment"] = appointment_id
-
-        values = data.get("values", {})
-        if isinstance(values, dict) and "__form_snapshot__" in values:
-            smuggled = values.pop("__form_snapshot__")
-            if not data.get("form_snapshot") and smuggled:
-                data["form_snapshot"] = smuggled
-
-        serializer = AppointmentCaptureSerializer(data=data)
-        if not serializer.is_valid():
-            return Response(serializer.errors, status=status.HTTP_400_BAD_REQUEST)
-
-        capture = serializer.save(appointment=appointment)
-
-        if appointment.patient_identity:
-            refresh_record_summary(appointment.patient_identity, appointment.provider)
-
-        _extract_prescription_from_capture(capture, appointment)
-
-        return Response(
-            AppointmentCaptureSerializer(capture).data,
-            status=status.HTTP_201_CREATED,
-        )
+class ProviderListView(APIView):
+    def get(self, request):
+        speciality = request.query_params.get("speciality", "")
+        providers = HealthcareProvider.objects.select_related("identity").prefetch_related("services")
+        if speciality:
+            providers = providers.filter(speciality__icontains=speciality)
+        data = []
+        for p in providers:
+            services = list(p.services.filter(price_visible=True).values(
+                "id", "name", "price", "currency", "estimated_duration"
+            ))
+            data.append({
+                "id": str(p.identity.id),
+                "first_name": p.identity.first_name,
+                "last_name": p.identity.last_name,
+                "speciality": p.speciality,
+                "clinic_name": p.clinic_name or "",
+                "county": p.county or "",
+                "bio": p.bio or "",
+                "languages": p.languages or [],
+                "insurances_accepted": p.insurances_accepted or [],
+                "profile_picture_url": p.profile_picture_url or "",
+                "clinic_logo_url": getattr(p, "clinic_logo_url", "") or "",
+                "services": services,
+            })
+        return Response(data)
 
 
-class ProviderDashboardStatsView(APIView):
+class ProviderPublicProfileView(APIView):
     def get(self, request, identity_id):
         try:
-            provider = HealthcareProvider.objects.get(identity__id=identity_id)
-        except HealthcareProvider.DoesNotExist:
+            identity = Identity.objects.get(id=identity_id)
+            provider = HealthcareProvider.objects.select_related("identity").get(identity=identity)
+        except (Identity.DoesNotExist, HealthcareProvider.DoesNotExist):
             return Response({"error": "Provider not found"}, status=status.HTTP_404_NOT_FOUND)
-
-        now = timezone.now()
-        today = now.date()
-
-        today_count = ProviderAppointment.objects.filter(
-            provider=provider,
-            start_time__date=today,
-        ).count()
-
-        week_start = today - timedelta(days=today.weekday())
-        week_end = week_start + timedelta(days=6)
-        this_week_appointments = ProviderAppointment.objects.filter(
-            provider=provider,
-            start_time__date__gte=week_start,
-            start_time__date__lte=week_end,
-        ).count()
-
-        month_start = today.replace(day=1)
-        total_patients_month = ProviderAppointment.objects.filter(
-            provider=provider,
-            start_time__date__gte=month_start,
-        ).count()
-
-        completed_qs = ProviderAppointment.objects.filter(
-            provider=provider,
-            status="completed",
-            end_time__isnull=False,
-            start_time__isnull=False,
-        ).annotate(
-            duration=ExpressionWrapper(
-                F("end_time") - F("start_time"), output_field=DurationField()
+        services = list(
+            provider.services.filter(price_visible=True).values(
+                "id", "name", "price", "currency", "estimated_duration", "description"
             )
         )
-        avg_duration = completed_qs.aggregate(avg=Avg("duration"))["avg"]
-        avg_duration_minutes = round(avg_duration.total_seconds() / 60) if avg_duration else 0
+        return Response({
+            "id": str(identity.id),
+            "first_name": identity.first_name,
+            "last_name": identity.last_name,
+            "title": provider.title or "Dr.",
+            "speciality": provider.speciality or "",
+            "clinic_name": provider.clinic_name or "",
+            "address": provider.address or "",
+            "county": provider.county or "",
+            "country": provider.country or "Kenya",
+            "bio": provider.bio or "",
+            "languages": provider.languages or [],
+            "insurances_accepted": provider.insurances_accepted or [],
+            "profile_picture_url": provider.profile_picture_url or "",
+            "clinic_logo_url": getattr(provider, "clinic_logo_url", "") or "",
+            "services": services,
+        })
 
-        pending_count = ProviderAppointment.objects.filter(
+
+class ProviderAvailableSlotsView(APIView):
+    def get(self, request, identity_id):
+        query_date_str = request.query_params.get("date")
+        if not query_date_str:
+            return Response({"error": "date param required (YYYY-MM-DD)"}, status=400)
+        try:
+            query_date = date.fromisoformat(query_date_str)
+        except ValueError:
+            return Response({"error": "Invalid date format"}, status=400)
+        try:
+            identity = Identity.objects.get(id=identity_id)
+            provider = HealthcareProvider.objects.get(identity=identity)
+        except (Identity.DoesNotExist, HealthcareProvider.DoesNotExist):
+            return Response({"error": "Provider not found"}, status=404)
+
+        python_dow = query_date.weekday()
+        dow_abbr = ["Mon", "Tue", "Wed", "Thu", "Fri", "Sat", "Sun"][python_dow]
+        query_date_str_iso = query_date.isoformat()
+
+        schedules = ProviderSchedule.objects.filter(
             provider=provider,
-            status__in=["scheduled", "pending"],
-            start_time__gte=now,
-        ).count()
+            start_date__lte=query_date,
+            end_date__gte=query_date,
+        )
 
-        DAY_ABBR = ["Mon", "Tue", "Wed", "Thu", "Fri", "Sat", "Sun"]
-        weekly_data = []
-        for i in range(6, -1, -1):
-            day_date = today - timedelta(days=i)
-            count = ProviderAppointment.objects.filter(
-                provider=provider,
-                start_time__date=day_date,
-            ).count()
-            weekly_data.append({
-                "date": day_date.isoformat(),
-                "day": DAY_ABBR[day_date.weekday()],
-                "count": count,
-            })
+        matching = []
+        for s in schedules:
+            if query_date_str_iso in (s.excluded_dates or []):
+                continue
+            r = s.recurrence
+            if r == "none" and s.start_date == query_date:
+                matching.append(s)
+            elif r == "daily":
+                matching.append(s)
+            elif r == "weekdays" and python_dow < 5:
+                matching.append(s)
+            elif r in ("weekly", "custom") and dow_abbr in (s.recurrence_days or []):
+                matching.append(s)
+
+        booked_qs = ProviderAppointment.objects.filter(
+            provider=provider,
+            start_time__date=query_date,
+            status__in=["scheduled", "confirmed", "in-progress"],
+        ).values_list("start_time", "end_time")
+
+        local_tz = dj_timezone.get_current_timezone()
+        booked_ranges = []
+        for utc_start, utc_end in booked_qs:
+            local_start = utc_start.astimezone(local_tz).replace(tzinfo=None)
+            local_end = utc_end.astimezone(local_tz).replace(tzinfo=None)
+            booked_ranges.append((local_start, local_end))
+
+        slots = []
+        seen = set()
+        for s in matching:
+            start_dt = datetime.combine(query_date, s.start_time)
+            end_dt = datetime.combine(query_date, s.end_time)
+            duration = s.service.estimated_duration if s.service else 30
+            cursor = start_dt
+            while cursor + timedelta(minutes=duration) <= end_dt:
+                slot_end = cursor + timedelta(minutes=duration)
+                key = cursor.isoformat()
+                if key not in seen:
+                    overlaps = any(
+                        not (slot_end <= bs or cursor >= be)
+                        for bs, be in booked_ranges
+                    )
+                    if not overlaps:
+                        slots.append({
+                            "start_time": cursor.isoformat(),
+                            "end_time": slot_end.isoformat(),
+                            "service_id": str(s.service.id) if s.service else None,
+                            "service_name": s.service.name if s.service else None,
+                            "location_type": s.location_type,
+                            "duration_minutes": duration,
+                        })
+                    seen.add(key)
+                cursor += timedelta(minutes=duration)
+
+        return Response(slots)
+
+
+class PatientDetailView(APIView):
+    def get(self, request, identity_id, patient_identity_id):
+        try:
+            patient_identity = Identity.objects.get(id=patient_identity_id)
+        except Identity.DoesNotExist:
+            return Response({"error": "Patient not found"}, status=status.HTTP_404_NOT_FOUND)
+
+        insurances = []
+        try:
+            from identity.models import patientAccount
+            account = patientAccount.objects.filter(identity=patient_identity).first()
+            if account:
+                insurances = getattr(account, "insurances", []) or []
+        except Exception:
+            pass
 
         return Response({
-            "today_count": today_count,
-            "this_week_appointments": this_week_appointments,
-            "total_patients_month": total_patients_month,
-            "avg_duration_minutes": avg_duration_minutes,
-            "pending_count": pending_count,
-            "weekly_data": weekly_data,
+            "phone_number": patient_identity.phone_number or "",
+            "first_name": patient_identity.first_name,
+            "last_name": patient_identity.last_name,
+            "email": patient_identity.email,
+            "insurances": insurances,
         })
+
+
+class ProviderPhotoUploadView(APIView):
+    def post(self, request, identity_id):
+        import cloudinary
+        import cloudinary.uploader
+
+        try:
+            identity = Identity.objects.get(id=identity_id)
+            provider = HealthcareProvider.objects.get(identity=identity)
+        except (Identity.DoesNotExist, HealthcareProvider.DoesNotExist):
+            return Response({"error": "Provider not found"}, status=status.HTTP_404_NOT_FOUND)
+
+        photo = request.FILES.get("photo")
+        if not photo:
+            return Response({"error": "No file provided."}, status=status.HTTP_400_BAD_REQUEST)
+
+        cloud_name = os.environ.get("CLOUDINARY_CLOUD_NAME")
+        api_key = os.environ.get("CLOUDINARY_API_KEY")
+        api_secret = os.environ.get("CLOUDINARY_API_SECRET")
+
+        if not all([cloud_name, api_key, api_secret]):
+            return Response({"error": "Cloudinary not configured."}, status=status.HTTP_500_INTERNAL_SERVER_ERROR)
+
+        cloudinary.config(cloud_name=cloud_name, api_key=api_key, api_secret=api_secret, secure=True)
+
+        try:
+            result = cloudinary.uploader.upload(
+                photo,
+                folder=f"veridoctor/providers/{identity_id}",
+                public_id="profile_photo",
+                overwrite=True,
+                resource_type="image",
+            )
+        except Exception as e:
+            return Response({"error": f"Upload failed: {str(e)}"}, status=status.HTTP_502_BAD_GATEWAY)
+
+        secure_url = result.get("secure_url")
+        if not secure_url:
+            return Response({"error": "No URL returned"}, status=status.HTTP_502_BAD_GATEWAY)
+
+        provider.profile_picture_url = secure_url
+        provider.save(update_fields=["profile_picture_url"])
+
+        return Response({"profile_picture_url": secure_url}, status=status.HTTP_200_OK)
