@@ -315,12 +315,30 @@ class PrescriptionView(APIView):
         try:
             identity = Identity.objects.get(id=identity_id)
             provider, _ = HealthcareProvider.objects.get_or_create(identity=identity)
-            patient_identity = find_identity_by_email(request.data.get("patient_email"))
+
+            patient_email = request.data.get("patient_email", "")
+            patient_name = request.data.get("patient_name", "")
+            raw_patient_id = request.data.get("patient_id", "")
+
+            # Resolve the real patient Identity. The frontend sends whichever
+            # identity it has (patient_identity from the appointment record) as
+            # patient_id, but older/edge-case rows may pass an appointment id
+            # instead — try a direct Identity lookup first, then fall back to
+            # matching by email, exactly like the booking flow already does.
+            patient_identity = None
+            if raw_patient_id:
+                try:
+                    patient_identity = Identity.objects.get(id=raw_patient_id)
+                except (Identity.DoesNotExist, ValueError):
+                    patient_identity = None
+            if not patient_identity and patient_email:
+                patient_identity = find_identity_by_email(patient_email)
+
             prescription = Prescription.objects.create(
                 provider=provider,
-                patient_id=request.data.get("patient_id", ""),
-                patient_name=request.data.get("patient_name", ""),
-                patient_email=request.data.get("patient_email", ""),
+                patient_id=raw_patient_id,
+                patient_name=patient_name,
+                patient_email=patient_email,
                 patient_identity=patient_identity,
                 diagnosis=request.data.get("diagnosis", ""),
                 notes=request.data.get("notes", ""),
@@ -328,13 +346,16 @@ class PrescriptionView(APIView):
             for drug in request.data.get("drugs", []):
                 PrescriptionDrug.objects.create(
                     prescription=prescription,
-                    drug_name=drug.get("drug_name", ""),
+                    drug_name=drug.get("name") or drug.get("drug_name", ""),
                     dosage=drug.get("dosage", ""),
                     frequency=drug.get("frequency", ""),
                     duration=drug.get("duration", ""),
                     instructions=drug.get("instructions", ""),
                 )
-            refresh_record_summary(patient_identity, provider)
+
+            if patient_identity:
+                refresh_record_summary(patient_identity, provider)
+
             serializer = PrescriptionSerializer(prescription)
             return Response(serializer.data, status=status.HTTP_201_CREATED)
         except Identity.DoesNotExist:
