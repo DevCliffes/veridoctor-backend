@@ -14,12 +14,25 @@ with connection.cursor() as cursor:
     cursor.execute(
         "ALTER TABLE provider_prescriptiondrug ADD COLUMN IF NOT EXISTS drug_name varchar(255) NOT NULL DEFAULT '';"
     )
+    # Check whether the legacy "name" column still exists before referencing it.
+    # Earlier deploys may have already dropped it, or it may never have existed
+    # under this exact name — querying information_schema avoids crashing the
+    # whole boot sequence if either column is already gone.
     cursor.execute(
-        "UPDATE provider_prescriptiondrug SET drug_name = name WHERE drug_name = '' AND name IS NOT NULL;"
+        """
+        SELECT column_name FROM information_schema.columns
+        WHERE table_name = 'provider_prescriptiondrug' AND column_name = 'name';
+        """
     )
-    cursor.execute(
-        "ALTER TABLE provider_prescriptiondrug DROP COLUMN IF EXISTS name;"
-    )
+    legacy_name_column_exists = cursor.fetchone() is not None
+
+    if legacy_name_column_exists:
+        cursor.execute(
+            "UPDATE provider_prescriptiondrug SET drug_name = name WHERE drug_name = '' AND name IS NOT NULL;"
+        )
+        cursor.execute(
+            "ALTER TABLE provider_prescriptiondrug DROP COLUMN IF EXISTS name;"
+        )
 
     # ── patientAccount missing columns ───────────────────────────────────────
     cursor.execute(
