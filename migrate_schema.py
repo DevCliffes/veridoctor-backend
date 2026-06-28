@@ -17,6 +17,9 @@ with connection.cursor() as cursor:
     cursor.execute(
         "UPDATE provider_prescriptiondrug SET drug_name = name WHERE drug_name = '' AND name IS NOT NULL;"
     )
+    cursor.execute(
+        "ALTER TABLE provider_prescriptiondrug DROP COLUMN IF EXISTS name;"
+    )
 
     # ── patientAccount missing columns ───────────────────────────────────────
     cursor.execute(
