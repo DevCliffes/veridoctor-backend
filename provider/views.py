@@ -339,15 +339,38 @@ class PrescriptionView(APIView):
                 notes=request.data.get("notes", ""),
             )
 
-            # Accept drug_name (new form) OR name (old form) — always save the row
-            for drug in request.data.get("drugs", []):
-                PrescriptionDrug.objects.create(
-                    prescription=prescription,
-                    drug_name=str(drug.get("drug_name") or drug.get("name") or "").strip(),
-                    dosage=str(drug.get("dosage") or "").strip(),
-                    frequency=str(drug.get("frequency") or "").strip(),
-                    duration=str(drug.get("duration") or "").strip(),
-                    instructions=str(drug.get("instructions") or "").strip(),
+            # TEMP DEBUG: wrap each drug creation so any failure is visible in the
+            # API response itself, instead of a silent/opaque 500. Remove once fixed.
+            drugs_data = request.data.get("drugs", [])
+            drug_errors = []
+            for i, drug in enumerate(drugs_data):
+                try:
+                    PrescriptionDrug.objects.create(
+                        prescription=prescription,
+                        drug_name=str(drug.get("drug_name") or drug.get("name") or "").strip(),
+                        dosage=str(drug.get("dosage") or "").strip(),
+                        frequency=str(drug.get("frequency") or "").strip(),
+                        duration=str(drug.get("duration") or "").strip(),
+                        instructions=str(drug.get("instructions") or "").strip(),
+                    )
+                except Exception as drug_exc:
+                    drug_errors.append({
+                        "index": i,
+                        "raw_drug": drug,
+                        "error": str(drug_exc),
+                        "error_type": type(drug_exc).__name__,
+                    })
+
+            if drug_errors:
+                # Prescription saved, but one or more drug rows failed.
+                # Return 200 with the failure details visible in the response body.
+                serializer = PrescriptionSerializer(prescription)
+                return Response(
+                    {
+                        **serializer.data,
+                        "_debug_drug_errors": drug_errors,
+                    },
+                    status=status.HTTP_200_OK,
                 )
 
             if patient_identity:
@@ -358,6 +381,20 @@ class PrescriptionView(APIView):
 
         except Identity.DoesNotExist:
             return Response({"error": "Identity not found"}, status=status.HTTP_404_NOT_FOUND)
+        except Exception as e:
+            # TEMP DEBUG: surface any other exception directly in the response body
+            # so the traceback is visible in DevTools Network -> Response, without
+            # needing access to Render logs. Remove once fixed.
+            import traceback
+            return Response(
+                {
+                    "error": "Unhandled exception in PrescriptionView.post",
+                    "error_type": type(e).__name__,
+                    "error_message": str(e),
+                    "traceback": traceback.format_exc(),
+                },
+                status=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            )
 
 
 class PrescriptionDetailView(APIView):
