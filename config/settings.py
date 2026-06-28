@@ -211,3 +211,131 @@ DEFAULT_AUTO_FIELD = "django.db.models.BigAutoField"
 
 # Default auth user model
 AUTH_USER_MODEL = "identity.Identity"
+
+
+# ──────────────────────────────────────────────
+# DJANGO UNFOLD ADMIN — BRANDING & DASHBOARD CONFIG
+# ──────────────────────────────────────────────
+from django.templatetags.static import static
+from django.urls import reverse_lazy
+from django.utils.translation import gettext_lazy as _
+
+UNFOLD = {
+    "SITE_TITLE": "Afia Cliniq Admin",
+    "SITE_HEADER": "Afia Cliniq",
+    "SITE_SUBHEADER": "Healthcare Platform Administration",
+    "SITE_URL": "/",
+    # Uncomment once you have logo files placed in a static/images/ folder:
+    # "SITE_ICON": lambda request: static("images/logo-icon.png"),
+    # "SITE_LOGO": lambda request: static("images/logo.png"),
+    "SITE_SYMBOL": "local_hospital",  # Material icon shown when no logo is set
+    "SHOW_HISTORY": True,
+    "SHOW_VIEW_ON_SITE": True,
+    "ENVIRONMENT": "config.unfold_helpers.environment_callback",
+    "DASHBOARD_CALLBACK": "config.unfold_helpers.dashboard_callback",
+    "COLORS": {
+        "primary": {
+            "50": "240 253 244",
+            "100": "220 252 231",
+            "200": "187 247 208",
+            "300": "134 239 172",
+            "400": "74 222 128",
+            "500": "22 163 74",   # core brand green
+            "600": "16 138 62",
+            "700": "15 109 51",
+            "800": "14 86 42",
+            "900": "12 71 36",
+            "950": "5 40 20",
+        },
+    },
+    "SIDEBAR": {
+        "show_search": True,
+        "show_all_applications": True,
+        "navigation": [
+            {
+                "title": _("Overview"),
+                "separator": True,
+                "items": [
+                    {
+                        "title": _("Dashboard"),
+                        "icon": "dashboard",
+                        "link": reverse_lazy("admin:index"),
+                    },
+                ],
+            },
+            {
+                "title": _("Appointments"),
+                "separator": True,
+                "items": [
+                    {
+                        "title": _("Provider appointments"),
+                        "icon": "event",
+                        "link": reverse_lazy(
+                            "admin:appointments_providerappointment_changelist"
+                        ),
+                    },
+                ],
+            },
+            {
+                "title": _("People"),
+                "separator": True,
+                "items": [
+                    {
+                        "title": _("Patient accounts"),
+                        "icon": "person",
+                        "link": reverse_lazy(
+                            "admin:identity_patientaccount_changelist"
+                        ),
+                    },
+                    {
+                        "title": _("Healthcare provider accounts"),
+                        "icon": "medical_services",
+                        "link": reverse_lazy(
+                            "admin:identity_healthcareprovideraccount_changelist"
+                        ),
+                    },
+                    {
+                        "title": _("Facility manager accounts"),
+                        "icon": "admin_panel_settings",
+                        "link": reverse_lazy(
+                            "admin:identity_facilitymanageraccount_changelist"
+                        ),
+                    },
+                    {
+                        "title": _("Branch manager accounts"),
+                        "icon": "supervisor_account",
+                        "link": reverse_lazy(
+                            "admin:identity_branchmanageraccount_changelist"
+                        ),
+                    },
+                    {
+                        "title": _("Identities"),
+                        "icon": "badge",
+                        "link": reverse_lazy("admin:identity_identity_changelist"),
+                    },
+                    {
+                        "title": _("OTPs"),
+                        "icon": "pin",
+                        "link": reverse_lazy("admin:identity_otp_changelist"),
+                    },
+                ],
+            },
+            {
+                "title": _("Facilities"),
+                "separator": True,
+                "items": [
+                    {
+                        "title": _("Facilities"),
+                        "icon": "apartment",
+                        "link": reverse_lazy("admin:facility_facility_changelist"),
+                    },
+                    {
+                        "title": _("Workstations"),
+                        "icon": "desktop_windows",
+                        "link": reverse_lazy("admin:facility_workstation_changelist"),
+                    },
+                ],
+            },
+        ],
+    },
+}
