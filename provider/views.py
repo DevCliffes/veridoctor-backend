@@ -339,28 +339,16 @@ class PrescriptionView(APIView):
                 notes=request.data.get("notes", ""),
             )
 
-            drugs_data = request.data.get("drugs", [])
-            for drug in drugs_data:
-                # Accept both "name" (old form) and "drug_name" (new form)
-                # Strip whitespace and fall back to empty string — never save blank
-                drug_name = (
-                    str(drug.get("drug_name") or drug.get("name") or "").strip()
+            # Accept drug_name (new form) OR name (old form) — always save the row
+            for drug in request.data.get("drugs", []):
+                PrescriptionDrug.objects.create(
+                    prescription=prescription,
+                    drug_name=str(drug.get("drug_name") or drug.get("name") or "").strip(),
+                    dosage=str(drug.get("dosage") or "").strip(),
+                    frequency=str(drug.get("frequency") or "").strip(),
+                    duration=str(drug.get("duration") or "").strip(),
+                    instructions=str(drug.get("instructions") or "").strip(),
                 )
-                dosage = str(drug.get("dosage") or "").strip()
-                frequency = str(drug.get("frequency") or "").strip()
-                duration = str(drug.get("duration") or "").strip()
-                instructions = str(drug.get("instructions") or "").strip()
-
-                # Only create the drug row if there's actually a name
-                if drug_name:
-                    PrescriptionDrug.objects.create(
-                        prescription=prescription,
-                        drug_name=drug_name,
-                        dosage=dosage,
-                        frequency=frequency,
-                        duration=duration,
-                        instructions=instructions,
-                    )
 
             if patient_identity:
                 refresh_record_summary(patient_identity, provider)
