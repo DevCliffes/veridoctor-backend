@@ -320,11 +320,6 @@ class PrescriptionView(APIView):
             patient_name = request.data.get("patient_name", "")
             raw_patient_id = request.data.get("patient_id", "")
 
-            # Resolve the real patient Identity. The frontend sends whichever
-            # identity it has (patient_identity from the appointment record) as
-            # patient_id, but older/edge-case rows may pass an appointment id
-            # instead — try a direct Identity lookup first, then fall back to
-            # matching by email, exactly like the booking flow already does.
             patient_identity = None
             if raw_patient_id:
                 try:
@@ -343,21 +338,36 @@ class PrescriptionView(APIView):
                 diagnosis=request.data.get("diagnosis", ""),
                 notes=request.data.get("notes", ""),
             )
-            for drug in request.data.get("drugs", []):
-                PrescriptionDrug.objects.create(
-                    prescription=prescription,
-                    drug_name=drug.get("name") or drug.get("drug_name", ""),
-                    dosage=drug.get("dosage", ""),
-                    frequency=drug.get("frequency", ""),
-                    duration=drug.get("duration", ""),
-                    instructions=drug.get("instructions", ""),
+
+            drugs_data = request.data.get("drugs", [])
+            for drug in drugs_data:
+                # Accept both "name" (old form) and "drug_name" (new form)
+                # Strip whitespace and fall back to empty string — never save blank
+                drug_name = (
+                    str(drug.get("drug_name") or drug.get("name") or "").strip()
                 )
+                dosage = str(drug.get("dosage") or "").strip()
+                frequency = str(drug.get("frequency") or "").strip()
+                duration = str(drug.get("duration") or "").strip()
+                instructions = str(drug.get("instructions") or "").strip()
+
+                # Only create the drug row if there's actually a name
+                if drug_name:
+                    PrescriptionDrug.objects.create(
+                        prescription=prescription,
+                        drug_name=drug_name,
+                        dosage=dosage,
+                        frequency=frequency,
+                        duration=duration,
+                        instructions=instructions,
+                    )
 
             if patient_identity:
                 refresh_record_summary(patient_identity, provider)
 
             serializer = PrescriptionSerializer(prescription)
             return Response(serializer.data, status=status.HTTP_201_CREATED)
+
         except Identity.DoesNotExist:
             return Response({"error": "Identity not found"}, status=status.HTTP_404_NOT_FOUND)
 
@@ -384,8 +394,13 @@ class PatientPrescriptionView(APIView):
     def get(self, request):
         patient_email = request.query_params.get("patient_email")
         if not patient_email:
-            return Response({"error": "patient_email query param required"}, status=status.HTTP_400_BAD_REQUEST)
-        prescriptions = Prescription.objects.filter(patient_email=patient_email).order_by("-created_at")
+            return Response(
+                {"error": "patient_email query param required"},
+                status=status.HTTP_400_BAD_REQUEST,
+            )
+        prescriptions = Prescription.objects.filter(
+            patient_email=patient_email
+        ).order_by("-created_at")
         serializer = PrescriptionSerializer(prescriptions, many=True)
         return Response(serializer.data, status=status.HTTP_200_OK)
 
