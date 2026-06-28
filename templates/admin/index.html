@@ -1,0 +1,31 @@
+{% extends 'unfold/layouts/base_simple.html' %}
+{% load i18n unfold %}
+
+{% block breadcrumbs %}{% endblock %}
+
+{% block title %}
+  {% trans 'Dashboard' %} | {{ site_title|default:_('Django site admin') }}
+{% endblock %}
+
+{% block branding %}
+  <h1 id="site-name">
+    <a href="{% url 'admin:index' %}">
+      {{ site_header }}
+    </a>
+  </h1>
+{% endblock %}
+
+{% block content %}
+  {% component "unfold/components/flex.html" with class="gap-4 flex-wrap" %}
+    {% for item in kpi %}
+      {% component "unfold/components/card.html" with class="lg:w-1/4 min-w-[220px]" %}
+        {% component "unfold/components/text.html" %}
+          {{ item.title }}
+        {% endcomponent %}
+        {% component "unfold/components/title.html" %}
+          {{ item.metric }}
+        {% endcomponent %}
+      {% endcomponent %}
+    {% endfor %}
+  {% endcomponent %}
+{% endblock %}
