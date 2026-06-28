@@ -33,71 +33,104 @@ def _extract_prescription_from_capture(capture, appointment):
         if not snapshot or not values:
             return None
 
-        label_map = {}
-        for section in snapshot:
-            for field in section.get("fields", []):
-                fid = field.get("id")
-                if fid:
-                    label_map[fid] = (field.get("label") or field.get("name") or fid).lower()
-
-        PRESCRIPTION_KEYWORDS = {"prescription", "drug", "medication", "dosage", "diagnosis", "medicine"}
-
-        has_prescription_content = any(
-            any(kw in label for kw in PRESCRIPTION_KEYWORDS)
-            for label in label_map.values()
-        )
-
-        if not has_prescription_content:
-            return None
-
+        # ── Preferred path: structured prescription block ───────────────────
+        # Forms with a dedicated "isPrescription" section write directly into
+        # values["prescription"] = {diagnosis, notes, drugs: [...]} with clean,
+        # already-correct field names (drug_name, dosage, frequency, duration,
+        # instructions). When present, use this directly instead of guessing
+        # from flat field labels — it's authoritative and avoids false-positive
+        # keyword matches (e.g. a "Current Medications" history field containing
+        # the word "medication" and the text "None").
+        structured = values.get("prescription")
         diagnosis_parts = []
         notes_parts = []
         drug_entries = []
 
-        for field_id, label in label_map.items():
-            val = values.get(field_id)
-            if not val:
-                continue
+        if isinstance(structured, dict) and structured.get("drugs"):
+            if structured.get("diagnosis"):
+                diagnosis_parts.append(str(structured["diagnosis"]))
+            if structured.get("notes"):
+                notes_parts.append(str(structured["notes"]))
 
-            if "diagnosis" in label:
-                diagnosis_parts.append(str(val))
+            for item in structured["drugs"]:
+                if not isinstance(item, dict):
+                    continue
+                drug_name = str(item.get("drug_name") or item.get("name") or "").strip()
+                if not drug_name:
+                    continue
+                drug_entries.append({
+                    "drug_name": drug_name,
+                    "dosage": str(item.get("dosage") or "").strip(),
+                    "frequency": str(item.get("frequency") or "").strip(),
+                    "duration": str(item.get("duration") or "").strip(),
+                    "instructions": str(item.get("instructions") or "").strip(),
+                })
 
-            elif "note" in label or "comment" in label or "remark" in label:
-                notes_parts.append(str(val))
+        # ── Fallback path: legacy keyword-matching over flat fields ──────────
+        # Used only for forms/captures that don't have a structured
+        # "prescription" block (older form snapshots).
+        if not drug_entries:
+            label_map = {}
+            for section in snapshot:
+                for field in section.get("fields", []):
+                    fid = field.get("id")
+                    if fid:
+                        label_map[fid] = (field.get("label") or field.get("name") or fid).lower()
 
-            elif any(kw in label for kw in ("drug", "medication", "medicine", "prescription")):
-                if isinstance(val, list):
-                    for item in val:
-                        if isinstance(item, dict):
-                            drug_entries.append({
-                                "drug_name": item.get("drug_name") or item.get("name") or item.get("medication") or "Unknown",
-                                "dosage": item.get("dosage") or item.get("dose") or "",
-                                "frequency": item.get("frequency") or item.get("freq") or "",
-                                "duration": item.get("duration") or "",
-                                "instructions": item.get("instructions") or item.get("notes") or "",
-                            })
-                        else:
-                            drug_entries.append({
-                                "drug_name": str(item),
-                                "dosage": "", "frequency": "", "duration": "", "instructions": "",
-                            })
-                elif isinstance(val, str) and val.strip():
-                    drug_entries.append({
-                        "drug_name": val.strip(),
-                        "dosage": "", "frequency": "", "duration": "", "instructions": "",
-                    })
+            PRESCRIPTION_KEYWORDS = {"prescription", "drug", "medication", "dosage", "diagnosis", "medicine"}
 
-            elif "dosage" in label or "dose" in label:
-                if drug_entries:
-                    drug_entries[-1]["dosage"] = str(val)
+            has_prescription_content = any(
+                any(kw in label for kw in PRESCRIPTION_KEYWORDS)
+                for label in label_map.values()
+            )
 
-            elif "frequency" in label or "freq" in label:
-                if drug_entries:
-                    drug_entries[-1]["frequency"] = str(val)
+            if not has_prescription_content and not diagnosis_parts:
+                return None
 
-            elif "duration" in label:
-                if drug_entries:
-                    drug_entries[-1]["duration"] = str(val)
+            for field_id, label in label_map.items():
+                val = values.get(field_id)
+                if not val:
+                    continue
+
+                if "diagnosis" in label:
+                    diagnosis_parts.append(str(val))
+
+                elif "note" in label or "comment" in label or "remark" in label:
+                    notes_parts.append(str(val))
+
+                elif any(kw in label for kw in ("drug", "medication", "medicine", "prescription")):
+                    if isinstance(val, list):
+                        for item in val:
+                            if isinstance(item, dict):
+                                drug_entries.append({
+                                    "drug_name": item.get("drug_name") or item.get("name") or item.get("medication") or "Unknown",
+                                    "dosage": item.get("dosage") or item.get("dose") or "",
+                                    "frequency": item.get("frequency") or item.get("freq") or "",
+                                    "duration": item.get("duration") or "",
+                                    "instructions": item.get("instructions") or item.get("notes") or "",
+                                })
+                            else:
+                                drug_entries.append({
+                                    "drug_name": str(item),
+                                    "dosage": "", "frequency": "", "duration": "", "instructions": "",
+                                })
+                    elif isinstance(val, str) and val.strip() and val.strip().lower() != "none":
+                        drug_entries.append({
+                            "drug_name": val.strip(),
+                            "dosage": "", "frequency": "", "duration": "", "instructions": "",
+                        })
+
+                elif "dosage" in label or "dose" in label:
+                    if drug_entries:
+                        drug_entries[-1]["dosage"] = str(val)
+
+                elif "frequency" in label or "freq" in label:
+                    if drug_entries:
+                        drug_entries[-1]["frequency"] = str(val)
+
+                elif "duration" in label:
+                    if drug_entries:
+                        drug_entries[-1]["duration"] = str(val)
 
         if not diagnosis_parts and not drug_entries:
             return None
