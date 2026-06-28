@@ -221,8 +221,8 @@ from django.urls import reverse_lazy
 from django.utils.translation import gettext_lazy as _
 
 UNFOLD = {
-    "SITE_TITLE": "Afia Cliniq Admin",
-    "SITE_HEADER": "Afia Cliniq",
+    "SITE_TITLE": "VeriDoctor Admin",
+    "SITE_HEADER": "VeriDoctor",
     "SITE_SUBHEADER": "Healthcare Platform Administration",
     "SITE_URL": "/",
     # Uncomment once you have logo files placed in a static/images/ folder:
