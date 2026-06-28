@@ -33,14 +33,6 @@ def _extract_prescription_from_capture(capture, appointment):
         if not snapshot or not values:
             return None
 
-        # ── Preferred path: structured prescription block ───────────────────
-        # Forms with a dedicated "isPrescription" section write directly into
-        # values["prescription"] = {diagnosis, notes, drugs: [...]} with clean,
-        # already-correct field names (drug_name, dosage, frequency, duration,
-        # instructions). When present, use this directly instead of guessing
-        # from flat field labels — it's authoritative and avoids false-positive
-        # keyword matches (e.g. a "Current Medications" history field containing
-        # the word "medication" and the text "None").
         structured = values.get("prescription")
         diagnosis_parts = []
         notes_parts = []
@@ -66,9 +58,6 @@ def _extract_prescription_from_capture(capture, appointment):
                     "instructions": str(item.get("instructions") or "").strip(),
                 })
 
-        # ── Fallback path: legacy keyword-matching over flat fields ──────────
-        # Used only for forms/captures that don't have a structured
-        # "prescription" block (older form snapshots).
         if not drug_entries:
             label_map = {}
             for section in snapshot:
@@ -94,10 +83,8 @@ def _extract_prescription_from_capture(capture, appointment):
 
                 if "diagnosis" in label:
                     diagnosis_parts.append(str(val))
-
                 elif "note" in label or "comment" in label or "remark" in label:
                     notes_parts.append(str(val))
-
                 elif any(kw in label for kw in ("drug", "medication", "medicine", "prescription")):
                     if isinstance(val, list):
                         for item in val:
@@ -119,15 +106,12 @@ def _extract_prescription_from_capture(capture, appointment):
                             "drug_name": val.strip(),
                             "dosage": "", "frequency": "", "duration": "", "instructions": "",
                         })
-
                 elif "dosage" in label or "dose" in label:
                     if drug_entries:
                         drug_entries[-1]["dosage"] = str(val)
-
                 elif "frequency" in label or "freq" in label:
                     if drug_entries:
                         drug_entries[-1]["frequency"] = str(val)
-
                 elif "duration" in label:
                     if drug_entries:
                         drug_entries[-1]["duration"] = str(val)
@@ -246,6 +230,7 @@ class PatientAppointmentView(APIView):
             appointment.save(update_fields=["patient_identity"])
             refresh_record_summary(patient_identity, appointment.provider)
 
+        # ── Notify provider ──────────────────────────────────────────────────
         if appointment.provider and appointment.provider.identity:
             provider_identity = appointment.provider.identity
             patient_name = f"{appointment.patient_first_name} {appointment.patient_last_name}".strip()
@@ -258,6 +243,7 @@ class PatientAppointmentView(APIView):
                 link=f"/appointments/{appointment.id}",
             )
 
+        # ── Notify patient ───────────────────────────────────────────────────
         if patient_identity:
             provider_name = ""
             if appointment.provider and appointment.provider.identity:
@@ -296,36 +282,61 @@ class PatientAppointmentView(APIView):
         new_status = updated.status
 
         patient_identity = updated.patient_identity
+        provider_identity = updated.provider.identity if updated.provider else None
         provider_name = ""
-        if updated.provider and updated.provider.identity:
-            pi = updated.provider.identity
+        patient_name = f"{updated.patient_first_name} {updated.patient_last_name}".strip()
+        if provider_identity:
+            pi = provider_identity
             provider_name = f"Dr. {pi.first_name} {pi.last_name}"
 
-        if patient_identity and new_status != old_status:
-            if new_status == "confirmed":
-                _notify(
-                    recipient_identity=patient_identity,
-                    notification_type="appointment_confirmed",
-                    title="Appointment confirmed",
-                    message=f"Your appointment with {provider_name} has been confirmed.",
-                    link="/appointments",
-                )
-            elif new_status == "cancelled":
-                _notify(
-                    recipient_identity=patient_identity,
-                    notification_type="appointment_cancelled",
-                    title="Appointment cancelled",
-                    message=f"Your appointment with {provider_name} has been cancelled.",
-                    link="/appointments",
-                )
-            elif new_status == "rescheduled":
-                _notify(
-                    recipient_identity=patient_identity,
-                    notification_type="appointment_rescheduled",
-                    title="Appointment rescheduled",
-                    message=f"Your appointment with {provider_name} has been rescheduled.",
-                    link="/appointments",
-                )
+        if new_status != old_status:
+            # ── Notify patient ───────────────────────────────────────────────
+            if patient_identity:
+                if new_status == "confirmed":
+                    _notify(
+                        recipient_identity=patient_identity,
+                        notification_type="appointment_confirmed",
+                        title="Appointment confirmed",
+                        message=f"Your appointment with {provider_name} has been confirmed.",
+                        link="/appointments",
+                    )
+                elif new_status == "cancelled":
+                    _notify(
+                        recipient_identity=patient_identity,
+                        notification_type="appointment_cancelled",
+                        title="Appointment cancelled",
+                        message=f"Your appointment with {provider_name} has been cancelled.",
+                        link="/appointments",
+                    )
+                elif new_status == "rescheduled":
+                    _notify(
+                        recipient_identity=patient_identity,
+                        notification_type="appointment_rescheduled",
+                        title="Appointment rescheduled",
+                        message=f"Your appointment with {provider_name} has been rescheduled.",
+                        link="/appointments",
+                    )
+
+            # ── Notify provider ──────────────────────────────────────────────
+            if provider_identity:
+                if new_status == "cancelled":
+                    _notify(
+                        recipient_identity=provider_identity,
+                        notification_type="appointment_cancelled",
+                        title="Appointment cancelled by patient",
+                        message=f"{patient_name} cancelled their appointment on "
+                                f"{updated.start_time.strftime('%d %b %Y at %H:%M')}.",
+                        link=f"/appointments/{updated.id}",
+                    )
+                elif new_status == "rescheduled":
+                    _notify(
+                        recipient_identity=provider_identity,
+                        notification_type="appointment_rescheduled",
+                        title="Appointment rescheduled by patient",
+                        message=f"{patient_name} rescheduled their appointment to "
+                                f"{updated.start_time.strftime('%d %b %Y at %H:%M')}.",
+                        link=f"/appointments/{updated.id}",
+                    )
 
         return Response(ProviderAppointmentSerializer(updated).data)
 
@@ -347,7 +358,6 @@ class ProviderAppointmentView(APIView):
         if filter_type == "today":
             qs = qs.filter(start_time__date=now.date()).order_by("start_time")
         elif filter_type == "past":
-            # Most recent past appointment first.
             qs = qs.filter(end_time__lt=now).order_by("-start_time")
         elif filter_type == "all":
             qs = qs.order_by("start_time")
@@ -381,6 +391,8 @@ class ProviderAppointmentView(APIView):
             refresh_record_summary(patient_identity, provider)
 
             provider_name = f"Dr. {provider.identity.first_name} {provider.identity.last_name}"
+
+            # ── Notify patient ───────────────────────────────────────────────
             _notify(
                 recipient_identity=patient_identity,
                 notification_type="appointment_booked",
@@ -388,6 +400,18 @@ class ProviderAppointmentView(APIView):
                 message=f"{provider_name} has scheduled an appointment for you on "
                         f"{appointment.start_time.strftime('%d %b %Y at %H:%M')}.",
                 link="/appointments",
+            )
+
+        # ── Notify provider ──────────────────────────────────────────────────
+        if provider and provider.identity:
+            patient_name = f"{appointment.patient_first_name} {appointment.patient_last_name}".strip()
+            _notify(
+                recipient_identity=provider.identity,
+                notification_type="appointment_booked",
+                title="Appointment added",
+                message=f"You scheduled an appointment for {patient_name} on "
+                        f"{appointment.start_time.strftime('%d %b %Y at %H:%M')}.",
+                link=f"/appointments/{appointment.id}",
             )
 
         return Response(
@@ -426,44 +450,69 @@ class ProviderAppointmentDetailView(APIView):
         new_status = updated.status
 
         patient_identity = updated.patient_identity
+        provider_identity = updated.provider.identity if updated.provider else None
         provider_name = ""
-        if updated.provider and updated.provider.identity:
-            pi = updated.provider.identity
+        patient_name = f"{updated.patient_first_name} {updated.patient_last_name}".strip()
+        if provider_identity:
+            pi = provider_identity
             provider_name = f"Dr. {pi.first_name} {pi.last_name}"
 
-        if patient_identity and new_status != old_status:
-            if new_status == "confirmed":
-                _notify(
-                    recipient_identity=patient_identity,
-                    notification_type="appointment_confirmed",
-                    title="Appointment confirmed",
-                    message=f"Your appointment with {provider_name} has been confirmed.",
-                    link="/appointments",
-                )
-            elif new_status == "cancelled":
-                _notify(
-                    recipient_identity=patient_identity,
-                    notification_type="appointment_cancelled",
-                    title="Appointment cancelled",
-                    message=f"Your appointment with {provider_name} has been cancelled.",
-                    link="/appointments",
-                )
-            elif new_status == "rescheduled":
-                _notify(
-                    recipient_identity=patient_identity,
-                    notification_type="appointment_rescheduled",
-                    title="Appointment rescheduled",
-                    message=f"Your appointment with {provider_name} has been rescheduled.",
-                    link="/appointments",
-                )
-            elif new_status == "in-progress":
-                _notify(
-                    recipient_identity=patient_identity,
-                    notification_type="appointment_confirmed",
-                    title="Your consultation has started",
-                    message=f"Your consultation with {provider_name} is now in progress.",
-                    link="/appointments",
-                )
+        if new_status != old_status:
+            # ── Notify patient ───────────────────────────────────────────────
+            if patient_identity:
+                if new_status == "confirmed":
+                    _notify(
+                        recipient_identity=patient_identity,
+                        notification_type="appointment_confirmed",
+                        title="Appointment confirmed",
+                        message=f"Your appointment with {provider_name} has been confirmed.",
+                        link="/appointments",
+                    )
+                elif new_status == "cancelled":
+                    _notify(
+                        recipient_identity=patient_identity,
+                        notification_type="appointment_cancelled",
+                        title="Appointment cancelled",
+                        message=f"Your appointment with {provider_name} has been cancelled.",
+                        link="/appointments",
+                    )
+                elif new_status == "rescheduled":
+                    _notify(
+                        recipient_identity=patient_identity,
+                        notification_type="appointment_rescheduled",
+                        title="Appointment rescheduled",
+                        message=f"Your appointment with {provider_name} has been rescheduled.",
+                        link="/appointments",
+                    )
+                elif new_status == "in-progress":
+                    _notify(
+                        recipient_identity=patient_identity,
+                        notification_type="appointment_confirmed",
+                        title="Your consultation has started",
+                        message=f"Your consultation with {provider_name} is now in progress.",
+                        link="/appointments",
+                    )
+
+            # ── Notify provider ──────────────────────────────────────────────
+            if provider_identity:
+                if new_status == "cancelled":
+                    _notify(
+                        recipient_identity=provider_identity,
+                        notification_type="appointment_cancelled",
+                        title="Appointment cancelled",
+                        message=f"The appointment with {patient_name} on "
+                                f"{updated.start_time.strftime('%d %b %Y at %H:%M')} was cancelled.",
+                        link=f"/appointments/{updated.id}",
+                    )
+                elif new_status == "rescheduled":
+                    _notify(
+                        recipient_identity=provider_identity,
+                        notification_type="appointment_rescheduled",
+                        title="Appointment rescheduled",
+                        message=f"The appointment with {patient_name} has been rescheduled to "
+                                f"{updated.start_time.strftime('%d %b %Y at %H:%M')}.",
+                        link=f"/appointments/{updated.id}",
+                    )
 
         return Response(ProviderAppointmentSerializer(updated).data)
 
