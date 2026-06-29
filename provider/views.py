@@ -48,6 +48,7 @@ class ProviderProfileView(APIView):
             "email": identity.email,
             "title": provider.title or "Dr.",
             "speciality": provider.speciality or "",
+            "subspecialties": provider.subspecialties or [],
             "phone_number": provider.phone_number or identity.phone_number or "",
             "licence_number": provider.licence_number or "",
             "licence_type": provider.licence_type or "",
@@ -88,7 +89,7 @@ class ProviderProfileView(APIView):
         identity.save()
 
         for field in [
-            "speciality", "phone_number", "licence_number", "licence_type",
+            "speciality", "subspecialties", "phone_number", "licence_number", "licence_type",
             "title", "clinic_name", "address", "county", "country",
             "bio", "insurances_accepted", "languages", "profile_picture_url",
             "national_id_number", "national_id_image",
@@ -511,6 +512,7 @@ class ProviderListView(APIView):
                 "first_name": p.identity.first_name,
                 "last_name": p.identity.last_name,
                 "speciality": p.speciality,
+                "subspecialties": p.subspecialties or [],
                 "clinic_name": p.clinic_name or "",
                 "county": p.county or "",
                 "bio": p.bio or "",
@@ -541,6 +543,7 @@ class ProviderPublicProfileView(APIView):
             "last_name": identity.last_name,
             "title": provider.title or "Dr.",
             "speciality": provider.speciality or "",
+            "subspecialties": provider.subspecialties or [],
             "clinic_name": provider.clinic_name or "",
             "address": provider.address or "",
             "county": provider.county or "",
