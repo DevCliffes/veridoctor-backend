@@ -6,11 +6,13 @@ class Notification(BaseModel):
     """
     A single in-app notification for a recipient (provider or patient).
     """
+
     NOTIFICATION_TYPE_CHOICES = [
         ("appointment_booked", "Appointment booked"),
         ("appointment_confirmed", "Appointment confirmed"),
         ("appointment_cancelled", "Appointment cancelled"),
         ("appointment_rescheduled", "Appointment rescheduled"),
+        ("appointment_reminder", "Appointment reminder"),
         ("prescription_added", "Prescription added"),
         ("prescription_ready", "Prescription ready"),
         ("record_access_requested", "Record access requested"),
@@ -43,3 +45,40 @@ class Notification(BaseModel):
 
     def __str__(self):
         return f"[{self.notification_type}] {self.title} -> {self.recipient_identity_id}"
+
+
+class AppointmentReminderLog(BaseModel):
+    """
+    Tracks which reminder windows have already been sent for a given
+    appointment, so the periodic reminder job (polled every 5 minutes by
+    a GitHub Actions cron) never sends the same reminder twice.
+
+    One row per (appointment, reminder_type) pair — created the moment
+    that specific reminder is sent.
+    """
+
+    REMINDER_TYPE_CHOICES = [
+        ("24h", "24 hours before"),
+        ("3h", "3 hours before"),
+        ("10m", "10 minutes before"),
+    ]
+
+    appointment = models.ForeignKey(
+        "appointments.ProviderAppointment",
+        on_delete=models.CASCADE,
+        related_name="reminder_logs",
+    )
+    reminder_type = models.CharField(max_length=10, choices=REMINDER_TYPE_CHOICES)
+    sent_at = models.DateTimeField(auto_now_add=True)
+
+    class Meta:
+        ordering = ["-sent_at"]
+        constraints = [
+            models.UniqueConstraint(
+                fields=["appointment", "reminder_type"],
+                name="unique_reminder_per_appointment_and_type",
+            )
+        ]
+
+    def __str__(self):
+        return f"{self.reminder_type} reminder for appointment {self.appointment_id}"
