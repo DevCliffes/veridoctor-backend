@@ -1,0 +1,27 @@
+name: Appointment Reminders
+
+on:
+  schedule:
+    # Runs every 5 minutes. GitHub's scheduler can lag by a few minutes
+    # under load, but POLL_TOLERANCE in notifications/services.py absorbs
+    # that — reminders are not time-critical to the second.
+    - cron: "*/5 * * * *"
+  workflow_dispatch: {}
+    # Allows manually triggering a run from the Actions tab for testing,
+    # without waiting for the next scheduled tick.
+
+jobs:
+  send-reminders:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Call reminder endpoint
+        run: |
+          response=$(curl -s -o /tmp/response.json -w "%{http_code}" \
+            -X POST "https://api.veridoctor.com/notifications/send-reminders/" \
+            -H "X-Reminder-Secret: ${{ secrets.REMINDER_CRON_SECRET }}")
+          echo "HTTP status: $response"
+          cat /tmp/response.json
+          if [ "$response" -ge 400 ]; then
+            echo "Reminder endpoint returned an error"
+            exit 1
+          fi
