@@ -70,6 +70,11 @@ class HealthcareProviderAccount(BaseModel):
     practice_type = models.CharField(max_length=255, blank=True, default="")
     speciality = models.CharField(max_length=255, null=True, blank=True)
     sub_speciality = models.CharField(max_length=255, null=True, blank=True)
+    subspecialties = models.JSONField(
+        default=list,
+        blank=True,
+        help_text="List of subspecialty strings e.g. ['Pediatric Cardiology', 'Sports Medicine']",
+    )
     qualifications = models.ManyToManyField(
         "identity.ProviderQualificationsModel", blank=True
     )
