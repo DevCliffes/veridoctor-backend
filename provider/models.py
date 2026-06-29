@@ -10,6 +10,7 @@ class HealthcareProvider(models.Model):
     licence_number = models.CharField(max_length=100, blank=True, null=True)
     licence_type = models.CharField(max_length=100, blank=True, null=True)
     speciality = models.CharField(max_length=100, blank=True, null=True)
+    subspecialties = models.JSONField(default=list, blank=True)
     title = models.CharField(max_length=20, blank=True, null=True, default="Dr.")
     clinic_name = models.CharField(max_length=200, blank=True, null=True)
     address = models.CharField(max_length=300, blank=True, null=True)
