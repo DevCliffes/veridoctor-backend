@@ -218,6 +218,21 @@ class PatientAppointmentView(APIView):
         return Response(data)
 
     def post(self, request):
+        provider_id = request.data.get("provider")
+        if provider_id:
+            try:
+                provider = HealthcareProvider.objects.get(id=provider_id)
+            except HealthcareProvider.DoesNotExist:
+                return Response(
+                    {"error": "Provider not found"},
+                    status=status.HTTP_404_NOT_FOUND,
+                )
+            if not provider.profile_complete:
+                return Response(
+                    {"error": "This provider is not currently accepting bookings."},
+                    status=status.HTTP_400_BAD_REQUEST,
+                )
+
         serializer = ProviderAppointmentSerializer(data=request.data)
         if not serializer.is_valid():
             return Response(serializer.errors, status=status.HTTP_400_BAD_REQUEST)
@@ -374,6 +389,16 @@ class ProviderAppointmentView(APIView):
             provider = HealthcareProvider.objects.get(identity__id=identity_id)
         except HealthcareProvider.DoesNotExist:
             return Response({"error": "Provider not found"}, status=status.HTTP_404_NOT_FOUND)
+
+        # Safety net: even if the public provider list / frontend cache is
+        # stale, never allow a booking to be created against a provider
+        # whose profile isn't complete (subspecialties/languages/insurance
+        # are excluded from this check — see HealthcareProvider.missing_fields).
+        if not provider.profile_complete:
+            return Response(
+                {"error": "This provider is not currently accepting bookings."},
+                status=status.HTTP_400_BAD_REQUEST,
+            )
 
         data = request.data.copy()
         data["provider"] = provider.id
