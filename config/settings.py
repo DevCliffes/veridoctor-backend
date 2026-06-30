@@ -295,6 +295,13 @@ UNFOLD = {
                         ),
                     },
                     {
+                        "title": _("Healthcare providers"),
+                        "icon": "stethoscope",
+                        "link": reverse_lazy(
+                            "admin:provider_healthcareprovider_changelist"
+                        ),
+                    },
+                    {
                         "title": _("Facility manager accounts"),
                         "icon": "admin_panel_settings",
                         "link": reverse_lazy(
