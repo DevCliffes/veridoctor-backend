@@ -44,7 +44,62 @@ class HealthcareProvider(models.Model):
         help_text="List of additional credentials e.g. [{'id': '...', 'name': 'KMPDB', 'number': '...', 'image_url': '...'}]",
     )
 
+    # ── Profile completeness tracking ───────────────────────────────────────────
+    # Kept as a real DB column (instead of a computed property only) so it can be
+    # filtered/counted efficiently in the admin and on the dashboard.
+    # Excludes: subspecialties, languages, insurances_accepted, extra_credentials
+    # (all optional/enrichment fields, not required for booking).
+    profile_complete = models.BooleanField(default=False)
+
     created_at = models.DateTimeField(auto_now_add=True)
+
+    REQUIRED_TEXT_FIELDS = [
+        "phone_number",
+        "licence_number",
+        "licence_type",
+        "speciality",
+        "clinic_name",
+        "address",
+        "county",
+        "country",
+        "bio",
+        "national_id_number",
+        "business_reg_number",
+        "operating_licence",
+        "kra_pin",
+        "valid_licence_number",
+    ]
+    REQUIRED_IMAGE_FIELDS = [
+        "profile_picture_url",
+        "national_id_image",
+        "clinic_logo_url",
+        "business_reg_image",
+        "operating_licence_image",
+        "kra_pin_image",
+        "cr12_image",
+        "valid_licence_image",
+    ]
+
+    def missing_fields(self):
+        """Return a list of required field names that are blank/missing."""
+        missing = []
+        for field in self.REQUIRED_TEXT_FIELDS + self.REQUIRED_IMAGE_FIELDS:
+            value = getattr(self, field, None)
+            if value is None or str(value).strip() == "":
+                missing.append(field)
+        if not (self.identity.first_name and self.identity.first_name.strip()):
+            missing.append("first_name")
+        if not (self.identity.last_name and self.identity.last_name.strip()):
+            missing.append("last_name")
+        return missing
+
+    def recompute_profile_complete(self):
+        """Recalculate and return whether the profile is complete, without saving."""
+        return len(self.missing_fields()) == 0
+
+    def save(self, *args, **kwargs):
+        self.profile_complete = self.recompute_profile_complete()
+        super().save(*args, **kwargs)
 
     def __str__(self):
         return f"{self.identity} — {self.speciality or 'Provider'}"
@@ -55,8 +110,6 @@ class Service(models.Model):
     provider = models.ForeignKey(HealthcareProvider, on_delete=models.CASCADE, related_name="services")
     name = models.CharField(max_length=200)
     estimated_duration = models.IntegerField(help_text="Duration in minutes")
-    # null=True, blank=True — price is optional. Providers can leave it blank
-    # to indicate the price is negotiable and agreed between provider and patient.
     price = models.DecimalField(max_digits=10, decimal_places=2, null=True, blank=True)
     currency = models.CharField(max_length=10, default="KES")
     description = models.TextField(blank=True, null=True)
