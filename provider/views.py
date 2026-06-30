@@ -504,6 +504,8 @@ class ProviderListView(APIView):
             providers = providers.filter(speciality__icontains=speciality)
         data = []
         for p in providers:
+            if not p.profile_complete:
+                continue  # not bookable until profile is complete
             services = list(p.services.filter(price_visible=True).values(
                 "id", "name", "price", "currency", "estimated_duration"
             ))
