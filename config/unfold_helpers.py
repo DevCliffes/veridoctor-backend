@@ -21,7 +21,7 @@ def dashboard_callback(request, context):
     """
     from appointments.models import ProviderAppointment
     from identity.models import patientAccount, HealthcareProviderAccount
-    from providers.models import HealthcareProvider
+    from provider.models import HealthcareProvider
 
     incomplete_count = HealthcareProvider.objects.filter(profile_complete=False).count()
 
@@ -47,7 +47,7 @@ def dashboard_callback(request, context):
                     "title": "Incomplete Profiles",
                     "metric": incomplete_count,
                     "icon": "warning",
-                    "link": "/admin/providers/healthcareprovider/?profile_complete__exact=0",
+                    "link": "/admin/provider/healthcareprovider/?profile_complete__exact=0",
                 },
             ],
         }
