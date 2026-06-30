@@ -44,7 +44,7 @@ def dashboard_callback(request, context):
                     "icon": "event",
                 },
                 {
-                    "title": "Incomplete Profiles",
+                    "title": "Incomplete Provider Profiles",
                     "metric": incomplete_count,
                     "icon": "warning",
                     "link": "/admin/provider/healthcareprovider/?profile_complete__exact=0",
