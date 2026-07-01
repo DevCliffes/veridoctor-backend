@@ -513,6 +513,7 @@ class ProviderListView(APIView):
                 "id": str(p.identity.id),
                 "first_name": p.identity.first_name,
                 "last_name": p.identity.last_name,
+                "title": p.title or "Dr.",
                 "speciality": p.speciality,
                 "subspecialties": p.subspecialties or [],
                 "clinic_name": p.clinic_name or "",
