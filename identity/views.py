@@ -378,6 +378,32 @@ class IdentityAccountsView(APIView):
             serializer = HealthcareProviderAccountSerializer(data=provider_payload)
             if serializer.is_valid():
                 serializer.save(identity=identity)
+
+                # ── Sync core fields onto the provider.HealthcareProvider record ──
+                # HealthcareProviderAccount (this app) and HealthcareProvider (the
+                # provider app) are two separate models. The provider's own profile
+                # page, the public "Find a Doctor" list, and public doctor profiles
+                # all read from HealthcareProvider, not from this account record —
+                # so without this sync, speciality/licence info entered at signup
+                # silently never appears anywhere else.
+                try:
+                    from provider.models import HealthcareProvider
+                    provider, _ = HealthcareProvider.objects.get_or_create(identity=identity)
+                    if phone_number:
+                        provider.phone_number = phone_number
+                    speciality = request.data.get("speciality")
+                    if speciality:
+                        provider.speciality = speciality
+                    licence_number = request.data.get("licence_number")
+                    if licence_number:
+                        provider.licence_number = licence_number
+                    licence_type = request.data.get("licence_type")
+                    if licence_type:
+                        provider.licence_type = licence_type
+                    provider.save()
+                except Exception:
+                    pass
+
                 return Response({"detail": "account created"}, status=status.HTTP_201_CREATED)
             return Response(serializer.errors, status=status.HTTP_400_BAD_REQUEST)
         elif account_type == "facility_manager":
