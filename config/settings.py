@@ -33,9 +33,20 @@ else:
         for url in os.getenv("FRONTEND_URLS", "").split(",")
         if url.strip()
     ]
+
+    # FIX: CSRF_TRUSTED_ORIGINS previously only included the frontend URLs.
+    # That left the backend's own domain (where /admin/login/ is served from)
+    # untrusted, so Django rejected the admin login POST with
+    # "Forbidden (403) CSRF verification failed." Added BACKEND_URL below.
     CSRF_TRUSTED_ORIGINS = [
         url.strip()
         for url in os.getenv("FRONTEND_URLS", "").split(",")
+        if url.strip()
+    ] + [
+        url.strip()
+        for url in os.getenv(
+            "BACKEND_URL", "https://veridoctor-backend-1.onrender.com"
+        ).split(",")
         if url.strip()
     ]
 
