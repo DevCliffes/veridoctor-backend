@@ -2,10 +2,12 @@ from django.utils import timezone
 from rest_framework.views import APIView
 from rest_framework.response import Response
 from rest_framework import status
+from rest_framework.permissions import IsAuthenticated
 from identity.models import Identity
 from provider.models import HealthcareProvider
 from .models import PatientProviderRecordSummary, RecordAccessGrant
 from .serializers import PatientProviderRecordSummarySerializer
+from .pin_permissions import RecordsUnlockRequired
 
 
 class PatientRecordSummaryView(APIView):
@@ -42,6 +44,8 @@ class PatientTimelineView(APIView):
       type     — filter by record type: "consultation" or "prescription"
       provider — filter consultations to a specific provider (identity_id).
     """
+    permission_classes = [IsAuthenticated, RecordsUnlockRequired]
+
     def get(self, request, patient_identity_id):
         try:
             patient_identity = Identity.objects.get(id=patient_identity_id)
