@@ -147,6 +147,12 @@ DATABASES = {
 
 # SECRETS
 JWT_SECRET = os.getenv("JWT_SECRET")
+
+# WEB PUSH (VAPID) SETTINGS
+VAPID_PRIVATE_KEY = os.getenv("VAPID_PRIVATE_KEY")
+VAPID_PUBLIC_KEY = os.getenv("VAPID_PUBLIC_KEY")
+VAPID_CLAIMS_EMAIL = os.getenv("VAPID_CLAIMS_EMAIL", "mailto:support@veridoctor.com")
+
 # EMAIL SETTINGS
 # SMTP server config
 # EMAIL_BACKEND = "django.core.mail.backends.console.EmailBackend"  # For dev
