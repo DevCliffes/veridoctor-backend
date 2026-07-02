@@ -47,14 +47,16 @@ def send_push_on_notification_created(sender, instance, created, **kwargs):
                 data=payload,
                 vapid_private_key=settings.VAPID_PRIVATE_KEY,
                 vapid_claims={"sub": settings.VAPID_CLAIMS_EMAIL},
+                ttl=60,
             )
             logger.warning("PUSH DEBUG: Successfully sent push to subscription %s", sub.id)
         except WebPushException as e:
             status_code = getattr(e.response, "status_code", None)
             response_text = getattr(e.response, "text", None)
+            response_headers = dict(getattr(e.response, "headers", {}) or {})
             logger.warning(
-                "PUSH DEBUG: WebPushException for subscription %s — status=%s, body=%s, error=%s",
-                sub.id, status_code, response_text, e,
+                "PUSH DEBUG: WebPushException for subscription %s — status=%s, body=%r, headers=%s, error=%s",
+                sub.id, status_code, response_text, response_headers, e,
             )
             if status_code in (404, 410):
                 sub.delete()
