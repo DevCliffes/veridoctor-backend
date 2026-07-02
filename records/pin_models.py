@@ -1,23 +1,24 @@
-from django.conf import settings
 from django.contrib.auth.hashers import make_password, check_password
 from django.db import models
 from django.utils import timezone
+from identity.models import Identity
+from shared.models import BaseModel
 
 MAX_FAILED_ATTEMPTS = 5
 LOCKOUT_MINUTES = 15
 
 
-class PatientRecordsPin(models.Model):
-    patient = models.OneToOneField(
-        settings.AUTH_USER_MODEL,
-        on_delete=models.CASCADE,
-        related_name="records_pin",
+class PatientRecordsPin(BaseModel):
+    """
+    Patient-side PIN gating access to their own health records.
+    Independent of platform login credentials (JWT).
+    """
+    patient_identity = models.OneToOneField(
+        Identity, on_delete=models.CASCADE, related_name="records_pin"
     )
     pin_hash = models.CharField(max_length=128)
     failed_attempts = models.PositiveIntegerField(default=0)
     locked_until = models.DateTimeField(null=True, blank=True)
-    created_at = models.DateTimeField(auto_now_add=True)
-    updated_at = models.DateTimeField(auto_now=True)
 
     def set_pin(self, raw_pin):
         self.pin_hash = make_password(raw_pin)
@@ -42,4 +43,4 @@ class PatientRecordsPin(models.Model):
         self.save(update_fields=["failed_attempts", "locked_until", "updated_at"])
 
     def __str__(self):
-        return f"RecordsPin(patient_id={self.patient_id})"
+        return f"RecordsPin({self.patient_identity})"
