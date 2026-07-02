@@ -16,6 +16,13 @@ from .views import (
 )
 
 urlpatterns = [
+    
+    # Records PIN (patient-side)
+    path("pin/status", RecordsPinStatusView.as_view()),
+    path("pin/set", RecordsPinSetView.as_view()),
+    path("pin/verify", RecordsPinVerifyView.as_view()),
+    path("pin/change", RecordsPinChangeView.as_view()),
+    
     # Patient-facing
     path("patient/<uuid:patient_identity_id>/summary", PatientRecordSummaryView.as_view()),
     path("patient/<uuid:patient_identity_id>/timeline", PatientTimelineView.as_view()),
