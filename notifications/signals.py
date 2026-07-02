@@ -19,7 +19,13 @@ def send_push_on_notification_created(sender, instance, created, **kwargs):
     subscriptions = PushSubscription.objects.filter(
         identity_id=instance.recipient_identity_id
     )
-    if not subscriptions.exists():
+    count = subscriptions.count()
+    logger.warning(
+        "PUSH DEBUG: Notification %s created for identity %s — found %s subscription(s).",
+        instance.id, instance.recipient_identity_id, count,
+    )
+
+    if count == 0:
         return
 
     payload = json.dumps(
@@ -42,11 +48,17 @@ def send_push_on_notification_created(sender, instance, created, **kwargs):
                 vapid_private_key=settings.VAPID_PRIVATE_KEY,
                 vapid_claims={"sub": settings.VAPID_CLAIMS_EMAIL},
             )
+            logger.warning("PUSH DEBUG: Successfully sent push to subscription %s", sub.id)
         except WebPushException as e:
             status_code = getattr(e.response, "status_code", None)
+            response_text = getattr(e.response, "text", None)
+            logger.warning(
+                "PUSH DEBUG: WebPushException for subscription %s — status=%s, body=%s, error=%s",
+                sub.id, status_code, response_text, e,
+            )
             if status_code in (404, 410):
                 sub.delete()
-            else:
-                logger.warning(
-                    "Push notification failed for subscription %s: %s", sub.id, e
-                )
+        except Exception as e:
+            logger.warning(
+                "PUSH DEBUG: Unexpected error sending push to subscription %s: %s", sub.id, e
+            )
