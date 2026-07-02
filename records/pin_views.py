@@ -104,3 +104,28 @@ class RecordsPinChangeView(APIView):
 
 # RecordsPinResetView intentionally omitted — needs to know whether patient
 # re-auth uses OTP or password before this can be written correctly.
+class RecordsPinResetView(APIView):
+    """
+    Forgot-PIN flow: patient re-authenticates with their account password,
+    then sets a new PIN. Identity extends AbstractUser, so check_password
+    is available natively.
+    """
+    permission_classes = [IsAuthenticated]
+
+    def post(self, request):
+        password = request.data.get("password")
+        new_pin = request.data.get("new_pin")
+
+        if not password:
+            return Response({"error": "password is required"}, status=status.HTTP_400_BAD_REQUEST)
+        if not _is_valid_pin_format(new_pin):
+            return Response({"error": "new_pin must be 4-8 digits"}, status=status.HTTP_400_BAD_REQUEST)
+
+        if not request.user.check_password(password):
+            return Response({"error": "Password is incorrect."}, status=status.HTTP_400_BAD_REQUEST)
+
+        pin_obj, _ = PatientRecordsPin.objects.get_or_create(patient_identity=request.user)
+        pin_obj.set_pin(new_pin)
+        pin_obj.save()
+
+        return Response({"detail": "PIN reset successfully."})
