@@ -1,4 +1,10 @@
 from django.urls import path
+from .pin_views import (
+    RecordsPinStatusView,
+    RecordsPinSetView,
+    RecordsPinVerifyView,
+    RecordsPinChangeView,
+)
 from .views import (
     PatientRecordSummaryView,
     PatientTimelineView,
