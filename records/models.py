@@ -2,6 +2,7 @@ from django.db import models
 from identity.models import Identity
 from provider.models import HealthcareProvider
 from shared.models import BaseModel
+from .pin_models import PatientRecordsPin  # noqa
 
 
 class PatientProviderRecordSummary(BaseModel):
