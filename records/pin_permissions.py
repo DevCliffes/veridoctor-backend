@@ -46,32 +46,34 @@ class RecordsUnlockRequired(BasePermission):
 
 class ProviderPatientRelationshipRequired(BasePermission):
     """
-    Provider-side equivalent of RecordsUnlockRequired. A provider viewing
-    records for a patient never has a PIN to unlock — instead, access is
-    granted if the requesting provider has at least one non-cancelled
-    ProviderAppointment with that patient (i.e. a genuine, pre-existing
-    care relationship). This backs the "Your records for this patient —
-    No consent needed" panel on the provider's appointment detail page,
-    which is a fundamentally different access model from a patient
-    viewing their own timeline and must not share RecordsUnlockRequired.
+    Provider-side equivalent of RecordsUnlockRequired.
 
-    Expects the view to have `patient_identity_id` in its URL kwargs.
+    NOTE: unlike RecordsUnlockRequired, this does NOT rely on
+    request.user — the provider frontend does not currently attach a
+    Bearer token to its requests (no provider endpoint in this codebase
+    enforces IsAuthenticated; every one of them trusts an identity_id
+    passed explicitly in the URL instead). Using request.user here would
+    mean this permission fails unconditionally for every real provider
+    request, which is exactly what caused the 401 -> redirect-to-login
+    loop when this was first written against IsAuthenticated.
+
+    Access is granted if the provider identified by the `provider_id`
+    URL kwarg has at least one non-cancelled ProviderAppointment with the
+    patient identified by `patient_identity_id`.
     """
     message = "No existing care relationship found with this patient."
 
     def has_permission(self, request, view):
-        if not request.user or not request.user.is_authenticated:
-            return False
-
+        provider_identity_id = view.kwargs.get("provider_id")
         patient_identity_id = view.kwargs.get("patient_identity_id")
-        if not patient_identity_id:
+        if not provider_identity_id or not patient_identity_id:
             return False
 
         from provider.models import HealthcareProvider
         from appointments.models import ProviderAppointment
 
         try:
-            provider = HealthcareProvider.objects.get(identity=request.user)
+            provider = HealthcareProvider.objects.get(identity__id=provider_identity_id)
         except HealthcareProvider.DoesNotExist:
             return False
 
