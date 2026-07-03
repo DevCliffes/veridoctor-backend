@@ -33,6 +33,134 @@ ALLOWED_DOCUMENT_FIELDS = [
 ]
 
 
+# ─────────────────────────────────────────────────────────────────────────
+# SCHEDULE OVERLAP DETECTION
+#
+# Recurring schedules can share overlapping date ranges without ever
+# occurring on the same actual day (e.g. Mon/Wed/Fri vs Tue/Thu), so a naive
+# "do these date ranges intersect" check would produce false positives and
+# false negatives. Instead we expand both schedules day-by-day (bounded to
+# a fixed window) and check whether they land on the same calendar date
+# with overlapping times -- mirroring expandToCalendarEvents() in the
+# frontend's Schedule.tsx exactly, so what gets rejected here matches what
+# would actually render as a conflict on the calendar.
+# ─────────────────────────────────────────────────────────────────────────
+
+# recurrence_days is stored using JS's Date.getDay() convention
+# (Sunday=0..Saturday=6) -- see DAY_ABBR in Schedule.tsx -- NOT Python's
+# date.weekday() convention (Monday=0..Sunday=6).
+DOW_ABBR_JS = ["Sun", "Mon", "Tue", "Wed", "Thu", "Fri", "Sat"]
+
+# Recurring "never-ending" schedules are stored with a sentinel end_date of
+# 2099-12-31 (see the overrides in ProviderScheduleView.post and
+# ProviderScheduleDetailView.patch). Expanding a recurrence out that far to
+# check for overlaps isn't useful in practice, so detection is bounded to
+# this many days from today.
+MAX_OVERLAP_CHECK_DAYS = 730
+
+
+def _js_dow_abbr(day):
+    return DOW_ABBR_JS[(day.weekday() + 1) % 7]
+
+
+def _schedule_occurs_on(spec, day):
+    if day < spec["start_date"] or day > spec["end_date"]:
+        return False
+    if day.isoformat() in (spec["excluded_dates"] or []):
+        return False
+    recurrence = spec["recurrence"]
+    if recurrence == "none":
+        return day == spec["start_date"]
+    if recurrence == "daily":
+        return True
+    if recurrence == "weekdays":
+        return day.weekday() < 5
+    if recurrence in ("weekly", "custom"):
+        return _js_dow_abbr(day) in (spec["recurrence_days"] or [])
+    return False
+
+
+def _find_conflicting_date(new_spec, existing_spec, window_start, window_end):
+    """
+    Returns the first calendar date on which both schedule specs occur AND
+    their times overlap, or None if they never conflict within the window.
+    """
+    if not (
+        new_spec["start_time"] < existing_spec["end_time"]
+        and new_spec["end_time"] > existing_spec["start_time"]
+    ):
+        return None
+
+    range_start = max(new_spec["start_date"], existing_spec["start_date"], window_start)
+    range_end = min(new_spec["end_date"], existing_spec["end_date"], window_end)
+    if range_start > range_end:
+        return None
+
+    cursor = range_start
+    while cursor <= range_end:
+        if _schedule_occurs_on(new_spec, cursor) and _schedule_occurs_on(existing_spec, cursor):
+            return cursor
+        cursor += timedelta(days=1)
+    return None
+
+
+def _spec_from_schedule(schedule):
+    return {
+        "start_date": schedule.start_date,
+        "end_date": schedule.end_date,
+        "start_time": schedule.start_time,
+        "end_time": schedule.end_time,
+        "recurrence": schedule.recurrence,
+        "recurrence_days": schedule.recurrence_days,
+        "excluded_dates": schedule.excluded_dates,
+    }
+
+
+def _spec_from_data(data):
+    return {
+        "start_date": data["start_date"],
+        "end_date": data["end_date"],
+        "start_time": data["start_time"],
+        "end_time": data["end_time"],
+        "recurrence": data.get("recurrence", "none"),
+        "recurrence_days": data.get("recurrence_days", []) or [],
+        "excluded_dates": data.get("excluded_dates", []) or [],
+    }
+
+
+def _check_schedule_overlap(provider, new_spec, exclude_schedule_id=None):
+    """
+    Checks new_spec against every other ProviderSchedule for this provider.
+    Returns a Response(409) describing the conflict if one is found,
+    otherwise None.
+    """
+    window_start = date.today()
+    window_end = window_start + timedelta(days=MAX_OVERLAP_CHECK_DAYS)
+
+    existing_qs = ProviderSchedule.objects.filter(provider=provider)
+    if exclude_schedule_id:
+        existing_qs = existing_qs.exclude(id=exclude_schedule_id)
+
+    for existing in existing_qs:
+        conflict_date = _find_conflicting_date(
+            new_spec, _spec_from_schedule(existing), window_start, window_end
+        )
+        if conflict_date:
+            existing_label = existing.service.name if existing.service else "an existing block"
+            return Response(
+                {
+                    "error": (
+                        f'This time slot overlaps with "{existing_label}" '
+                        f"on {conflict_date.isoformat()}."
+                    ),
+                    "conflict_date": conflict_date.isoformat(),
+                    "conflicting_schedule_id": str(existing.id),
+                },
+                status=status.HTTP_409_CONFLICT,
+            )
+    return None
+
+
 class ProviderProfileView(APIView):
     def get(self, request, identity_id):
         try:
@@ -456,6 +584,10 @@ class ProviderScheduleView(APIView):
             data["end_date"] = "2099-12-31"
         serializer = ProviderScheduleSerializer(data=data)
         if serializer.is_valid():
+            new_spec = _spec_from_data(serializer.validated_data)
+            conflict_response = _check_schedule_overlap(provider, new_spec)
+            if conflict_response:
+                return conflict_response
             serializer.save(provider=provider)
             return Response(serializer.data, status=status.HTTP_201_CREATED)
         return Response(serializer.errors, status=status.HTTP_400_BAD_REQUEST)
@@ -474,6 +606,18 @@ class ProviderScheduleDetailView(APIView):
             data["end_date"] = "2099-12-31"
         serializer = ProviderScheduleSerializer(schedule, data=data, partial=True)
         if serializer.is_valid():
+            # PATCH is partial, so build the full resulting spec (existing
+            # fields overlaid with the incoming changes) for overlap
+            # checking rather than relying on validated_data alone, which
+            # may omit fields the request didn't touch.
+            merged = _spec_from_schedule(schedule)
+            merged.update(serializer.validated_data)
+            new_spec = _spec_from_data(merged)
+            conflict_response = _check_schedule_overlap(
+                schedule.provider, new_spec, exclude_schedule_id=schedule.id
+            )
+            if conflict_response:
+                return conflict_response
             serializer.save()
             return Response(serializer.data, status=status.HTTP_200_OK)
         return Response(serializer.errors, status=status.HTTP_400_BAD_REQUEST)
