@@ -2,6 +2,7 @@ from django.urls import path
 from .views import (
     PatientRecordSummaryView,
     PatientTimelineView,
+    ProviderPatientTimelineView,
     ProviderPatientSummaryView,
     RecordAccessRequestView,
     PatientAccessRequestsView,
@@ -21,6 +22,8 @@ urlpatterns = [
     path("patient/<uuid:patient_identity_id>/summary", PatientRecordSummaryView.as_view()),
     path("patient/<uuid:patient_identity_id>/timeline", PatientTimelineView.as_view()),
     path("patient/<uuid:patient_identity_id>/access-requests", PatientAccessRequestsView.as_view()),
+    # Provider-facing (own records for a patient — no PIN, relationship-gated instead)
+    path("provider/patient/<uuid:patient_identity_id>/timeline", ProviderPatientTimelineView.as_view()),
     # Provider-facing (consultation panel)
     path("appointment/<str:appointment_id>/patient-summary", ProviderPatientSummaryView.as_view()),
     # Access grant flow
