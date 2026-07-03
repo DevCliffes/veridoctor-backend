@@ -1,5 +1,3 @@
-import traceback
-
 from rest_framework import status
 from rest_framework.permissions import IsAuthenticated
 from rest_framework.response import Response
@@ -17,22 +15,8 @@ class RecordsPinStatusView(APIView):
     permission_classes = [IsAuthenticated]
 
     def get(self, request):
-        # TEMPORARY try/except for debugging a live 500 — remove once the
-        # real cause is found and fixed. Render's free tier isn't showing
-        # us request-time tracebacks in Logs, so we surface it directly
-        # in the response instead.
-        try:
-            has_pin = PatientRecordsPin.objects.filter(patient_identity=request.user).exists()
-            return Response({"has_pin": has_pin})
-        except Exception as e:
-            return Response(
-                {
-                    "debug_error": str(e),
-                    "debug_error_type": type(e).__name__,
-                    "debug_traceback": traceback.format_exc(),
-                },
-                status=500,
-            )
+        has_pin = PatientRecordsPin.objects.filter(patient_identity=request.user).exists()
+        return Response({"has_pin": has_pin})
 
 
 class RecordsPinSetView(APIView):
@@ -118,6 +102,8 @@ class RecordsPinChangeView(APIView):
         return Response({"detail": "PIN updated successfully."})
 
 
+# RecordsPinResetView intentionally omitted — needs to know whether patient
+# re-auth uses OTP or password before this can be written correctly.
 class RecordsPinResetView(APIView):
     """
     Forgot-PIN flow: patient re-authenticates with their account password,
