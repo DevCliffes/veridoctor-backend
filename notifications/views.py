@@ -1,4 +1,5 @@
 import os
+import uuid
 
 from rest_framework.views import APIView
 from rest_framework.response import Response
@@ -19,11 +20,27 @@ class NotificationListView(APIView):
 
     def get(self, request):
         identity_id = request.query_params.get("identity_id")
-        if not identity_id:
+
+        # FIX: the frontend can occasionally send the literal string
+        # "null" (or "undefined") before its user state has loaded,
+        # instead of omitting the param entirely. Identity.objects.get()
+        # then throws an unhandled ValidationError trying to parse that
+        # as a UUID, surfacing as a 500. Treat these the same as a
+        # missing param and return a clean 400 instead.
+        if not identity_id or identity_id in ("null", "undefined"):
             return Response(
                 {"error": "identity_id query param required"},
                 status=status.HTTP_400_BAD_REQUEST,
             )
+
+        try:
+            uuid.UUID(str(identity_id))
+        except (ValueError, TypeError):
+            return Response(
+                {"error": "identity_id must be a valid UUID"},
+                status=status.HTTP_400_BAD_REQUEST,
+            )
+
         try:
             identity = Identity.objects.get(id=identity_id)
         except Identity.DoesNotExist:
