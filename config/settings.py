@@ -75,6 +75,20 @@ else:
     CSRF_COOKIE_DOMAIN = None
     SESSION_COOKIE_SAMESITE = "None"
 
+    # FIX: the records-unlock feature sends a custom X-Records-Unlock
+    # header on every /records/patient/<id>/... request. Django's
+    # django-cors-headers package only allows a small default set of
+    # headers unless you explicitly list extras — anything outside that
+    # list gets blocked at the browser's CORS preflight stage before it
+    # ever reaches Django. That's why /records/patient/<id>/timeline was
+    # silently failing with no status code and an empty response instead
+    # of a normal 4xx/5xx — the browser blocked it before it was sent.
+    from corsheaders.defaults import default_headers
+
+    CORS_ALLOW_HEADERS = list(default_headers) + [
+        "x-records-unlock",
+    ]
+
 CORS_ALLOW_CREDENTIALS = True
 CORS_PREFLIGHT_MAX_AGE = 86400  # 1 day
 
