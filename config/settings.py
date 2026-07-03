@@ -16,10 +16,25 @@ SECRET_KEY = os.getenv(
 # SECURITY WARNING: don't run with debug turned on in production!
 DEBUG = os.getenv("DJANGO_DEBUG_MODE", "True") == "True"
 
+# FIX: hardcode the backend's own known Render hostnames as a permanent
+# fallback so a missing/misconfigured ALLOWED_HOSTS env var on Render can
+# never take the whole backend down again (as it just did — every request,
+# including login, was rejected with DisallowedHost). Env var values are
+# still added on top of these, in case of extra/preview hosts.
+DEFAULT_ALLOWED_HOSTS = [
+    "veridoctor-backend.onrender.com",
+    "veridoctor-backend-1.onrender.com",
+]
+
 if DEBUG:
     ALLOWED_HOSTS = ["localhost", "127.0.0.1"]
 else:
-    ALLOWED_HOSTS = os.getenv("ALLOWED_HOSTS", "").split(",")
+    env_hosts = [
+        host.strip()
+        for host in os.getenv("ALLOWED_HOSTS", "").split(",")
+        if host.strip()
+    ]
+    ALLOWED_HOSTS = list(set(DEFAULT_ALLOWED_HOSTS + env_hosts))
 
 # CORS SETTINGS
 if DEBUG:
