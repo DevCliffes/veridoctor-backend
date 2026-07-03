@@ -7,7 +7,7 @@ from identity.models import Identity
 from provider.models import HealthcareProvider
 from .models import PatientProviderRecordSummary, RecordAccessGrant
 from .serializers import PatientProviderRecordSummarySerializer
-from .pin_permissions import RecordsUnlockRequired
+from .pin_permissions import RecordsUnlockRequired, ProviderPatientRelationshipRequired
 
 
 class PatientRecordSummaryView(APIView):
@@ -39,6 +39,11 @@ class PatientTimelineView(APIView):
     """
     Patient-facing clinical timeline across AppointmentCapture,
     Prescription, and ProviderAppointment.
+
+    Gated by RecordsUnlockRequired — this is only for a patient viewing
+    their OWN records. Providers must use ProviderPatientTimelineView
+    below instead, which is gated by an actual care relationship rather
+    than a PIN.
 
     Query params:
       type     — filter by record type: "consultation" or "prescription"
@@ -150,6 +155,116 @@ class PatientTimelineView(APIView):
                     # on PatientProviderRecordSummary (consultation records).
                     "sensitivity": None,
                     "summary_id": None,
+                })
+
+        records.sort(key=lambda r: r["date"], reverse=True)
+
+        return Response({
+            "patient_id": str(patient_identity.id),
+            "total": len(records),
+            "records": records,
+        })
+
+
+class ProviderPatientTimelineView(APIView):
+    """
+    Provider-facing view of records THIS SPECIFIC PROVIDER created for a
+    patient — backs "Your records for this patient" in the provider's
+    AppointmentDetailPage, which explicitly requires no patient consent.
+
+    Gated by ProviderPatientRelationshipRequired (an existing appointment
+    relationship) instead of RecordsUnlockRequired (a patient PIN), since
+    request.user here is the provider, never the patient — the PIN check
+    on PatientTimelineView could never succeed for this caller and was
+    incorrectly returning 403, which the frontend's global 401/403
+    interceptor was then treating as a session expiry and logging the
+    provider out. Only returns records this provider themselves created
+    (not other providers' records for the same patient), matching what
+    "no consent needed" actually means.
+    """
+    permission_classes = [IsAuthenticated, ProviderPatientRelationshipRequired]
+
+    def get(self, request, patient_identity_id):
+        try:
+            patient_identity = Identity.objects.get(id=patient_identity_id)
+        except Identity.DoesNotExist:
+            return Response({"error": "Patient not found"}, status=status.HTTP_404_NOT_FOUND)
+
+        try:
+            provider = HealthcareProvider.objects.get(identity=request.user)
+        except HealthcareProvider.DoesNotExist:
+            return Response({"error": "Provider not found"}, status=status.HTTP_404_NOT_FOUND)
+
+        record_type = request.query_params.get("type")
+
+        from appointments.models import ProviderAppointment
+        from provider.models import Prescription
+
+        records = []
+
+        if not record_type or record_type == "consultation":
+            appointments = ProviderAppointment.objects.filter(
+                patient_identity=patient_identity,
+                provider=provider,
+            ).exclude(status="cancelled").select_related(
+                "provider", "provider__identity", "service"
+            ).prefetch_related("captures").order_by("-start_time")
+
+            for appt in appointments:
+                captures = []
+                for cap in appt.captures.all():
+                    captures.append({
+                        "form_name": cap.form_name,
+                        "form_snapshot": cap.form_snapshot,
+                        "values": cap.values,
+                        "captured_at": cap.created_at.isoformat(),
+                    })
+                records.append({
+                    "id": str(appt.id),
+                    "fhir_resource_type": "Encounter",
+                    "record_type": "consultation",
+                    "date": appt.start_time.isoformat(),
+                    "provider_name": f"Dr. {appt.provider.identity.first_name} {appt.provider.identity.last_name}",
+                    "speciality": appt.provider.speciality or "",
+                    "facility_name": appt.provider.clinic_name or "",
+                    "county": appt.provider.county or "",
+                    "appointment_type": appt.appointment_type,
+                    "status": appt.status,
+                    "service_name": appt.service.name if appt.service else None,
+                    "captures": captures,
+                    "has_clinical_notes": len(captures) > 0,
+                })
+
+        if not record_type or record_type == "prescription":
+            prescriptions = Prescription.objects.filter(
+                patient_identity=patient_identity,
+                provider=provider,
+            ).select_related(
+                "provider", "provider__identity"
+            ).prefetch_related("drugs").order_by("-created_at")
+
+            for rx in prescriptions:
+                drugs = []
+                for drug in rx.drugs.all():
+                    drugs.append({
+                        "drug_name": drug.drug_name,
+                        "dosage": drug.dosage,
+                        "frequency": drug.frequency,
+                        "duration": drug.duration,
+                        "instructions": drug.instructions,
+                    })
+                records.append({
+                    "id": str(rx.id),
+                    "fhir_resource_type": "MedicationRequest",
+                    "record_type": "prescription",
+                    "date": rx.created_at.isoformat(),
+                    "provider_name": f"Dr. {rx.provider.identity.first_name} {rx.provider.identity.last_name}",
+                    "speciality": rx.provider.speciality or "",
+                    "facility_name": rx.provider.clinic_name or "",
+                    "county": rx.provider.county or "",
+                    "diagnosis": rx.diagnosis,
+                    "notes": rx.notes,
+                    "drugs": drugs,
                 })
 
         records.sort(key=lambda r: r["date"], reverse=True)
