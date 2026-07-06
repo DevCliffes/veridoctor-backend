@@ -235,6 +235,39 @@ class TokenView(APIView):
             status=status.HTTP_200_OK,
         )
 
+class RefreshTokenView(APIView):
+    """
+    Exchanges a still-valid refresh token for a new access token, so a
+    provider/patient with the app open doesn't get logged out just because
+    an hour passed -- the frontend calls this silently on a 401 instead of
+    forcing a full re-login. Only a dead/invalid refresh token (>1 day, or
+    tampered) should end in a real logout.
+    """
+    authentication_classes = []
+
+    def post(self, request):
+        refresh_token = request.data.get("refresh_token")
+        if not refresh_token:
+            return Response(
+                {"error": "refresh_token is required"},
+                status=status.HTTP_400_BAD_REQUEST,
+            )
+
+        try:
+            payload = jwt.decode(refresh_token, settings.JWT_SECRET, algorithms=["HS256"])
+        except jwt.ExpiredSignatureError:
+            raise AuthenticationFailed("expired refresh token")
+        except jwt.InvalidTokenError:
+            raise AuthenticationFailed("invalid refresh token")
+
+        identity_id = payload.get("user_id")
+        try:
+            Identity.objects.get(id=identity_id)
+        except Identity.DoesNotExist:
+            raise AuthenticationFailed("invalid refresh token")
+
+        access_token = generateaccessToken(identity=identity_id)
+        return Response({"a_token": access_token}, status=status.HTTP_200_OK)
 
 class SendOTPView(APIView):
     def post(self, request):
