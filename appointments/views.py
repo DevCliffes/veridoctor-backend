@@ -1,5 +1,5 @@
 from django.utils import timezone
-from django.db.models import Avg, F, ExpressionWrapper, DurationField, Count
+from django.db.models import Avg, F, ExpressionWrapper, DurationField, Count, Sum
 from datetime import timedelta
 from identity.models import Identity
 from provider.models import HealthcareProvider, Prescription, PrescriptionDrug
@@ -655,6 +655,17 @@ class ProviderDashboardStatsView(APIView):
             start_time__gte=now,
         ).count()
 
+        # Revenue MTD: sum of service price for completed appointments this
+        # month. Appointments with no service or a null/negotiable price
+        # (service.price is None) are excluded -- there is nothing to sum.
+        revenue_mtd_agg = ProviderAppointment.objects.filter(
+            provider=provider,
+            status="completed",
+            start_time__date__gte=month_start,
+            service__price__isnull=False,
+        ).aggregate(total=Sum("service__price"))
+        revenue_mtd = revenue_mtd_agg["total"] or 0
+
         DAY_ABBR = ["Mon", "Tue", "Wed", "Thu", "Fri", "Sat", "Sun"]
         weekly_data = []
         for i in range(6, -1, -1):
@@ -676,4 +687,5 @@ class ProviderDashboardStatsView(APIView):
             "avg_duration_minutes": avg_duration_minutes,
             "pending_count": pending_count,
             "weekly_data": weekly_data,
+            "revenue_mtd": float(revenue_mtd),
         })
