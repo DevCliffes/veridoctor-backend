@@ -26,4 +26,5 @@ urlpatterns = [
     path("reset-password", ResetPasswordView.as_view()),
     path("reset-password/confirm", confirmResetPasswordView.as_view()),
     path("<str:identity_id>/accounts", IdentityAccountsView.as_view()),
+    path("refresh-token", RefreshTokenView.as_view(), name="refresh-token"),
 ]
