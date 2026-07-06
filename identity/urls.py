@@ -11,6 +11,7 @@ from identity.views import (
     ResetPasswordView,
     confirmResetPasswordView,
     TokenView,
+    RefreshTokenView,
 )
 
 urlpatterns = [
@@ -19,6 +20,7 @@ urlpatterns = [
     path("register/<str:identity_id>", RegisterView.as_view(), name="register-detail"),
     path("login", LoginView.as_view(), name="login"),
     path("authorise", TokenView.as_view(), name="login"),
+    path("refresh-token", RefreshTokenView.as_view(), name="refresh-token"),
     path("otp-send", SendOTPView.as_view()),
     path("otp-verify", VerifyOTPView.as_view()),
     path("activate/<str:account_type>", ActivateAccountView.as_view()),
@@ -26,5 +28,4 @@ urlpatterns = [
     path("reset-password", ResetPasswordView.as_view()),
     path("reset-password/confirm", confirmResetPasswordView.as_view()),
     path("<str:identity_id>/accounts", IdentityAccountsView.as_view()),
-    path("refresh-token", RefreshTokenView.as_view(), name="refresh-token"),
 ]
