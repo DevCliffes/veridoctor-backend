@@ -63,10 +63,9 @@ ALLOWED_DOCUMENT_FIELDS = [
 DOW_ABBR_JS = ["Sun", "Mon", "Tue", "Wed", "Thu", "Fri", "Sat"]
 
 # Recurring "never-ending" schedules are stored with a sentinel end_date of
-# 2099-12-31 (see the overrides in ProviderScheduleView.post and
-# ProviderScheduleDetailView.patch). Expanding a recurrence out that far to
-# check for overlaps isn't useful in practice, so detection is bounded to
-# this many days from today.
+# 2099-12-31 (see _resolve_end_date below). Expanding a recurrence out that
+# far to check for overlaps isn't useful in practice, so detection is
+# bounded to this many days from today.
 MAX_OVERLAP_CHECK_DAYS = 730
 
 
@@ -89,16 +88,10 @@ def _schedule_occurs_on(spec, day):
     if recurrence in ("weekly", "custom"):
         if _js_dow_abbr(day) not in (spec["recurrence_days"] or []):
             return False
-        # FIX: previously any matching weekday was treated as an occurrence,
-        # regardless of recurrence_interval. That meant e.g. two "every 2
-        # weeks on Mon" schedules starting on different offset weeks were
-        # flagged as conflicting even though they never actually land on
-        # the same date (false positive), while the converse case -- two
-        # interval-based schedules whose occurrences DO align -- could only
-        # be caught by accident, since interval never factored into the
-        # comparison at all. Determine which week `day` falls in relative
-        # to the schedule's own start_date, and only treat it as occurring
-        # every Nth such week.
+        # Determine which week `day` falls in relative to the schedule's
+        # own start_date, and only treat it as occurring every Nth such
+        # week, so interval-based schedules (e.g. "every 2 weeks on Mon")
+        # only match on the actual matching weeks rather than every week.
         interval = spec.get("recurrence_interval") or 1
         if interval <= 1:
             return True
@@ -159,6 +152,98 @@ def _spec_from_data(data):
         "recurrence_interval": data.get("recurrence_interval", 1) or 1,
         "excluded_dates": data.get("excluded_dates", []) or [],
     }
+
+
+def _compute_end_date_for_count(start_date, recurrence, recurrence_days, recurrence_interval, count):
+    """
+    Walks forward from start_date counting matching occurrences (using the
+    exact same occurrence logic as _schedule_occurs_on) until `count` has
+    been reached, and returns the date of the final (Nth) occurrence. This
+    is the real end_date for a recurrence_end_type="after" schedule -- it
+    must be computed, not assumed, because how many calendar days "N
+    occurrences" spans depends on recurrence type/days/interval.
+
+    Bounded to MAX_OVERLAP_CHECK_DAYS from start_date as a safety limit;
+    if the count isn't reached within that window (e.g. absurdly large
+    count on a rare recurrence), returns the last occurrence found instead
+    of looping indefinitely.
+    """
+    if not count or count <= 0:
+        return start_date
+
+    limit = start_date + timedelta(days=MAX_OVERLAP_CHECK_DAYS)
+    temp_spec = {
+        "start_date": start_date,
+        "end_date": limit,
+        "recurrence": recurrence,
+        "recurrence_days": recurrence_days,
+        "recurrence_interval": recurrence_interval,
+        "excluded_dates": [],
+    }
+
+    found = 0
+    cursor = start_date
+    last = start_date
+    while cursor <= limit:
+        if _schedule_occurs_on(temp_spec, cursor):
+            found += 1
+            last = cursor
+            if found >= count:
+                return last
+        cursor += timedelta(days=1)
+    return last  # ran out of window before reaching count -- best effort
+
+
+def _resolve_end_date(
+    recurrence,
+    end_type,
+    start_date,
+    recurrence_days,
+    recurrence_interval,
+    recurrence_end_date,
+    recurrence_count,
+):
+    """
+    Computes the correct end_date to persist for a schedule, based on its
+    recurrence_end_type. Returns None if recurrence is "none" (end_date is
+    whatever the caller already set/validated), or if the fields needed to
+    compute it are missing (in which case the caller's original end_date,
+    whatever it was, is left untouched).
+
+    FIX: previously only the "never" case was handled (hardcoded to the
+    2099-12-31 sentinel), leaving "on_date" and "after" submissions to
+    pass whatever end_date the client sent straight through -- which for
+    this frontend's Schedule.tsx was a stray, unrelated date-range field
+    that has no connection to the actual recurrence end. That silently
+    truncated the recurrence's real valid window, causing
+    _check_schedule_overlap to treat those schedules as never occurring
+    past that stray date and missing genuine conflicts (see the Home
+    Service / Consultation July 11 overlap).
+    """
+    if not recurrence or recurrence == "none":
+        return None
+
+    if end_type in (None, "never", ""):
+        return "2099-12-31"
+
+    if end_type == "on_date":
+        return recurrence_end_date or None
+
+    if end_type == "after":
+        if not recurrence_count:
+            return None
+        if isinstance(start_date, str):
+            start_date = date.fromisoformat(start_date)
+        computed = _compute_end_date_for_count(
+            start_date,
+            recurrence,
+            recurrence_days or [],
+            int(recurrence_interval or 1),
+            int(recurrence_count),
+        )
+        return computed.isoformat()
+
+    return None
 
 
 def _check_schedule_overlap(provider, new_spec, exclude_schedule_id=None):
@@ -610,11 +695,23 @@ class ProviderScheduleView(APIView):
         except Identity.DoesNotExist:
             return Response({"error": "Identity not found"}, status=status.HTTP_404_NOT_FOUND)
         data = request.data.copy()
-        if (
-            data.get("recurrence", "none") != "none"
-            and data.get("recurrence_end_type") in (None, "never", "")
-        ):
-            data["end_date"] = "2099-12-31"
+
+        # FIX: previously only handled recurrence_end_type == "never"
+        # (defaulting to the 2099-12-31 sentinel) and let "on_date"/"after"
+        # submissions pass through with whatever end_date the client sent
+        # -- see _resolve_end_date's docstring for the full story.
+        resolved_end_date = _resolve_end_date(
+            recurrence=data.get("recurrence", "none"),
+            end_type=data.get("recurrence_end_type"),
+            start_date=data.get("start_date"),
+            recurrence_days=data.get("recurrence_days") or [],
+            recurrence_interval=data.get("recurrence_interval") or 1,
+            recurrence_end_date=data.get("recurrence_end_date"),
+            recurrence_count=data.get("recurrence_count"),
+        )
+        if resolved_end_date:
+            data["end_date"] = resolved_end_date
+
         serializer = ProviderScheduleSerializer(data=data)
         if serializer.is_valid():
             new_spec = _spec_from_data(serializer.validated_data)
@@ -633,10 +730,24 @@ class ProviderScheduleDetailView(APIView):
         except ProviderSchedule.DoesNotExist:
             return Response({"error": "Schedule not found"}, status=status.HTTP_404_NOT_FOUND)
         data = request.data.copy()
-        effective_recurrence = data.get("recurrence", schedule.recurrence)
-        effective_end_type = data.get("recurrence_end_type", schedule.recurrence_end_type)
-        if effective_recurrence != "none" and effective_end_type in (None, "never", ""):
-            data["end_date"] = "2099-12-31"
+
+        # PATCH is partial, so fall back to the existing schedule's values
+        # for any field the request didn't touch -- otherwise e.g. patching
+        # only `location_type` on an "after"-type recurring schedule would
+        # see recurrence_count as missing and skip end_date resolution
+        # entirely, silently leaving/reverting it to something wrong.
+        resolved_end_date = _resolve_end_date(
+            recurrence=data.get("recurrence", schedule.recurrence),
+            end_type=data.get("recurrence_end_type", schedule.recurrence_end_type),
+            start_date=data.get("start_date", schedule.start_date.isoformat()),
+            recurrence_days=data.get("recurrence_days", schedule.recurrence_days) or [],
+            recurrence_interval=data.get("recurrence_interval", schedule.recurrence_interval) or 1,
+            recurrence_end_date=data.get("recurrence_end_date", schedule.recurrence_end_date),
+            recurrence_count=data.get("recurrence_count", schedule.recurrence_count),
+        )
+        if resolved_end_date:
+            data["end_date"] = resolved_end_date
+
         serializer = ProviderScheduleSerializer(schedule, data=data, partial=True)
         if serializer.is_valid():
             # PATCH is partial, so build the full resulting spec (existing
