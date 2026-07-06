@@ -44,6 +44,17 @@ ALLOWED_DOCUMENT_FIELDS = [
 # with overlapping times -- mirroring expandToCalendarEvents() in the
 # frontend's Schedule.tsx exactly, so what gets rejected here matches what
 # would actually render as a conflict on the calendar.
+#
+# Booked appointments are deliberately NOT part of this check. By design,
+# a booked appointment occupies a slot that was carved out of an existing
+# ProviderSchedule block (see ProviderAvailableSlotsView), and the calendar
+# UI already renders bookings as overriding their parent schedule slot.
+# As long as no two ProviderSchedule blocks are ever allowed to overlap,
+# there is structurally no room for two open slots -- and therefore no
+# room for two bookings -- to ever occupy the same time. Enforcing
+# non-overlap at the schedule layer is sufficient and is the single
+# source of truth; a separate booking-vs-booking check would be redundant
+# as long as this function has no gaps.
 # ─────────────────────────────────────────────────────────────────────────
 
 # recurrence_days is stored using JS's Date.getDay() convention
@@ -76,7 +87,27 @@ def _schedule_occurs_on(spec, day):
     if recurrence == "weekdays":
         return day.weekday() < 5
     if recurrence in ("weekly", "custom"):
-        return _js_dow_abbr(day) in (spec["recurrence_days"] or [])
+        if _js_dow_abbr(day) not in (spec["recurrence_days"] or []):
+            return False
+        # FIX: previously any matching weekday was treated as an occurrence,
+        # regardless of recurrence_interval. That meant e.g. two "every 2
+        # weeks on Mon" schedules starting on different offset weeks were
+        # flagged as conflicting even though they never actually land on
+        # the same date (false positive), while the converse case -- two
+        # interval-based schedules whose occurrences DO align -- could only
+        # be caught by accident, since interval never factored into the
+        # comparison at all. Determine which week `day` falls in relative
+        # to the schedule's own start_date, and only treat it as occurring
+        # every Nth such week.
+        interval = spec.get("recurrence_interval") or 1
+        if interval <= 1:
+            return True
+        start_week_monday = spec["start_date"] - timedelta(
+            days=spec["start_date"].weekday()
+        )
+        day_week_monday = day - timedelta(days=day.weekday())
+        weeks_elapsed = (day_week_monday - start_week_monday).days // 7
+        return weeks_elapsed % interval == 0
     return False
 
 
@@ -112,6 +143,7 @@ def _spec_from_schedule(schedule):
         "end_time": schedule.end_time,
         "recurrence": schedule.recurrence,
         "recurrence_days": schedule.recurrence_days,
+        "recurrence_interval": schedule.recurrence_interval,
         "excluded_dates": schedule.excluded_dates,
     }
 
@@ -124,6 +156,7 @@ def _spec_from_data(data):
         "end_time": data["end_time"],
         "recurrence": data.get("recurrence", "none"),
         "recurrence_days": data.get("recurrence_days", []) or [],
+        "recurrence_interval": data.get("recurrence_interval", 1) or 1,
         "excluded_dates": data.get("excluded_dates", []) or [],
     }
 
