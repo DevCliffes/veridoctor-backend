@@ -25,6 +25,37 @@ def _notify(recipient_identity, notification_type, title, message="", link=""):
         pass
 
 
+def _stamp_actual_times(appointment, old_status, new_status):
+    """Record real-world start/end timestamps the moment status actually
+    transitions — used to compute true consultation duration, distinct
+    from the scheduled start_time/end_time slot. Only stamps on the
+    transition itself (old_status != new_status) so re-saving an
+    already-in-progress or already-completed appointment doesn't reset
+    the clock.
+
+    Fallback: if an appointment is marked completed without ever having
+    passed through in-progress (actual_start_time still empty), we use
+    the scheduled start_time as a stand-in for actual_start_time rather
+    than leaving duration uncomputable — less precise than a real
+    in-progress timestamp, but still meaningful."""
+    if new_status == old_status:
+        return
+    now = timezone.now()
+    update_fields = []
+    if new_status == "in-progress" and not appointment.actual_start_time:
+        appointment.actual_start_time = now
+        update_fields.append("actual_start_time")
+    if new_status == "completed":
+        if not appointment.actual_start_time:
+            appointment.actual_start_time = appointment.start_time
+            update_fields.append("actual_start_time")
+        if not appointment.actual_end_time:
+            appointment.actual_end_time = now
+            update_fields.append("actual_end_time")
+    if update_fields:
+        appointment.save(update_fields=update_fields)
+
+
 def _extract_prescription_from_capture(capture, appointment):
     try:
         snapshot = capture.form_snapshot or []
@@ -245,7 +276,6 @@ class PatientAppointmentView(APIView):
             appointment.save(update_fields=["patient_identity"])
             refresh_record_summary(patient_identity, appointment.provider)
 
-        # ── Notify provider ──────────────────────────────────────────────────
         if appointment.provider and appointment.provider.identity:
             provider_identity = appointment.provider.identity
             patient_name = f"{appointment.patient_first_name} {appointment.patient_last_name}".strip()
@@ -258,7 +288,6 @@ class PatientAppointmentView(APIView):
                 link=f"/appointments/{appointment.id}",
             )
 
-        # ── Notify patient ───────────────────────────────────────────────────
         if patient_identity:
             provider_name = ""
             if appointment.provider and appointment.provider.identity:
@@ -296,6 +325,8 @@ class PatientAppointmentView(APIView):
         updated = serializer.save()
         new_status = updated.status
 
+        _stamp_actual_times(updated, old_status, new_status)
+
         patient_identity = updated.patient_identity
         provider_identity = updated.provider.identity if updated.provider else None
         provider_name = ""
@@ -305,7 +336,6 @@ class PatientAppointmentView(APIView):
             provider_name = f"Dr. {pi.first_name} {pi.last_name}"
 
         if new_status != old_status:
-            # ── Notify patient ───────────────────────────────────────────────
             if patient_identity:
                 if new_status == "confirmed":
                     _notify(
@@ -332,7 +362,6 @@ class PatientAppointmentView(APIView):
                         link="/appointments",
                     )
 
-            # ── Notify provider ──────────────────────────────────────────────
             if provider_identity:
                 if new_status == "cancelled":
                     _notify(
@@ -390,10 +419,6 @@ class ProviderAppointmentView(APIView):
         except HealthcareProvider.DoesNotExist:
             return Response({"error": "Provider not found"}, status=status.HTTP_404_NOT_FOUND)
 
-        # Safety net: even if the public provider list / frontend cache is
-        # stale, never allow a booking to be created against a provider
-        # whose profile isn't complete (subspecialties/languages/insurance
-        # are excluded from this check — see HealthcareProvider.missing_fields).
         if not provider.profile_complete:
             return Response(
                 {"error": "This provider is not currently accepting bookings."},
@@ -417,7 +442,6 @@ class ProviderAppointmentView(APIView):
 
             provider_name = f"Dr. {provider.identity.first_name} {provider.identity.last_name}"
 
-            # ── Notify patient ───────────────────────────────────────────────
             _notify(
                 recipient_identity=patient_identity,
                 notification_type="appointment_booked",
@@ -427,7 +451,6 @@ class ProviderAppointmentView(APIView):
                 link="/appointments",
             )
 
-        # ── Notify provider ──────────────────────────────────────────────────
         if provider and provider.identity:
             patient_name = f"{appointment.patient_first_name} {appointment.patient_last_name}".strip()
             _notify(
@@ -474,6 +497,8 @@ class ProviderAppointmentDetailView(APIView):
         updated = serializer.save()
         new_status = updated.status
 
+        _stamp_actual_times(updated, old_status, new_status)
+
         patient_identity = updated.patient_identity
         provider_identity = updated.provider.identity if updated.provider else None
         provider_name = ""
@@ -483,7 +508,6 @@ class ProviderAppointmentDetailView(APIView):
             provider_name = f"Dr. {pi.first_name} {pi.last_name}"
 
         if new_status != old_status:
-            # ── Notify patient ───────────────────────────────────────────────
             if patient_identity:
                 if new_status == "confirmed":
                     _notify(
@@ -518,7 +542,6 @@ class ProviderAppointmentDetailView(APIView):
                         link="/appointments",
                     )
 
-            # ── Notify provider ──────────────────────────────────────────────
             if provider_identity:
                 if new_status == "cancelled":
                     _notify(
@@ -639,11 +662,11 @@ class ProviderDashboardStatsView(APIView):
         completed_qs = ProviderAppointment.objects.filter(
             provider=provider,
             status="completed",
-            end_time__isnull=False,
-            start_time__isnull=False,
+            actual_start_time__isnull=False,
+            actual_end_time__isnull=False,
         ).annotate(
             duration=ExpressionWrapper(
-                F("end_time") - F("start_time"), output_field=DurationField()
+                F("actual_end_time") - F("actual_start_time"), output_field=DurationField()
             )
         )
         avg_duration = completed_qs.aggregate(avg=Avg("duration"))["avg"]
@@ -655,9 +678,6 @@ class ProviderDashboardStatsView(APIView):
             start_time__gte=now,
         ).count()
 
-        # Revenue MTD: sum of service price for completed appointments this
-        # month. Appointments with no service or a null/negotiable price
-        # (service.price is None) are excluded -- there is nothing to sum.
         revenue_mtd_agg = ProviderAppointment.objects.filter(
             provider=provider,
             status="completed",
