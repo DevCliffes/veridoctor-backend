@@ -67,6 +67,15 @@ class ProviderAppointment(BaseAppointment, BaseModel):
     message = models.TextField(blank=True)
     meet_id = models.CharField(max_length=32, unique=True, blank=True)
 
+    # Real-world timestamps captured when status actually transitions to
+    # in-progress / completed — distinct from start_time/end_time, which
+    # are just the scheduled slot and never move once booked (aside from
+    # reschedules). "Avg. Duration" on the dashboard is computed from
+    # these, so it reflects how long consultations actually took rather
+    # than how long the slot was booked for.
+    actual_start_time = models.DateTimeField(null=True, blank=True)
+    actual_end_time = models.DateTimeField(null=True, blank=True)
+
     class Meta:
         ordering = ["start_time"]
 
