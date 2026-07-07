@@ -17,6 +17,7 @@ from .views import (
     ProviderPhotoUploadView,
     ProviderDocumentUploadView,
     ProviderGenericImageUploadView,
+    ProviderReviewListView,
 )
 from appointments.views import (
     ProviderAppointmentView,
@@ -68,4 +69,8 @@ urlpatterns = [
 
     # Patient lookup
     path("<str:identity_id>/patients/<str:patient_identity_id>", PatientDetailView.as_view()),
+
+    path("<str:identity_id>/public-profile", ProviderPublicProfileView.as_view()),
+    # Reviews
+    path("<str:identity_id>/reviews", ProviderReviewListView.as_view()),
 ]
