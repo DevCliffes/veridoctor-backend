@@ -686,7 +686,13 @@ class ProviderDashboardStatsView(APIView):
             )
         )
         avg_duration = completed_qs.aggregate(avg=Avg("duration"))["avg"]
-        avg_duration_minutes = round(avg_duration.total_seconds() / 60) if avg_duration else 0
+        # Returned in whole seconds rather than pre-rounded to minutes: with
+        # short test/demo consultations (a few seconds each), rounding to
+        # the nearest minute collapses a real, non-zero average down to 0,
+        # which the dashboard then can't distinguish from "no data yet."
+        # Keeping seconds preserves that precision; the frontend formats it
+        # as minutes+seconds (e.g. "1m 12s" or "45s") instead of losing it.
+        avg_duration_seconds = round(avg_duration.total_seconds()) if avg_duration else 0
 
         pending_count = ProviderAppointment.objects.filter(
             provider=provider,
@@ -720,7 +726,7 @@ class ProviderDashboardStatsView(APIView):
             "today_count": today_count,
             "this_week_appointments": this_week_appointments,
             "total_patients_month": total_patients_month,
-            "avg_duration_minutes": avg_duration_minutes,
+            "avg_duration_seconds": avg_duration_seconds,
             "pending_count": pending_count,
             "weekly_data": weekly_data,
             "revenue_mtd": float(revenue_mtd),
