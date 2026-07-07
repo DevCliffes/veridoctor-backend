@@ -1,4 +1,17 @@
 import os
+from datetime import date, datetime, timedelta
+
+from django.db.models import Avg, Count
+from django.utils import timezone as dj_timezone
+
+from rest_framework import status
+from rest_framework.response import Response
+from rest_framework.views import APIView
+
+from identity.models import Identity
+from appointments.models import ProviderAppointment
+from records.services import find_identity_by_email, refresh_record_summary
+
 from .models import (
     HealthcareProvider,
     Service,
@@ -6,21 +19,17 @@ from .models import (
     Prescription,
     PrescriptionDrug,
     ProviderSchedule,
+    ProviderReview,
 )
 from .serializers import (
     ServiceSerializer,
     FormSerializer,
     PrescriptionSerializer,
     ProviderScheduleSerializer,
+    ProviderReviewPublicSerializer,
+    ProviderReviewCreateSerializer,
 )
-from rest_framework.views import APIView
-from rest_framework.response import Response
-from rest_framework import status
-from identity.models import Identity
-from datetime import date, datetime, timedelta
-from django.utils import timezone as dj_timezone
-from appointments.models import ProviderAppointment
-from records.services import find_identity_by_email, refresh_record_summary
+
 
 ALLOWED_DOCUMENT_FIELDS = [
     "national_id_image",
@@ -998,3 +1007,73 @@ class ProviderPhotoUploadView(APIView):
         provider.save(update_fields=["profile_picture_url"])
 
         return Response({"profile_picture_url": secure_url}, status=status.HTTP_200_OK)
+
+
+
+class ProviderReviewListView(APIView):
+    """Public: list reviews for a provider, first-name-only."""
+    def get(self, request, provider_id):
+        try:
+            provider = HealthcareProvider.objects.get(id=provider_id)
+        except HealthcareProvider.DoesNotExist:
+            return Response({"error": "Provider not found"}, status=status.HTTP_404_NOT_FOUND)
+
+        reviews = ProviderReview.objects.filter(provider=provider)
+        agg = reviews.aggregate(average=Avg("rating"), count=Count("id"))
+
+        return Response({
+            "average_rating": round(agg["average"], 1) if agg["average"] else None,
+            "review_count": agg["count"],
+            "reviews": ProviderReviewPublicSerializer(reviews, many=True).data,
+        })
+
+    def post(self, request, provider_id):
+        try:
+            provider = HealthcareProvider.objects.get(id=provider_id)
+        except HealthcareProvider.DoesNotExist:
+            return Response({"error": "Provider not found"}, status=status.HTTP_404_NOT_FOUND)
+
+        appointment_id = request.data.get("appointment")
+        if not appointment_id:
+            return Response(
+                {"error": "appointment is required"}, status=status.HTTP_400_BAD_REQUEST
+            )
+
+        try:
+            appointment = ProviderAppointment.objects.get(
+                id=appointment_id, provider=provider
+            )
+        except ProviderAppointment.DoesNotExist:
+            return Response(
+                {"error": "Appointment not found for this provider"},
+                status=status.HTTP_404_NOT_FOUND,
+            )
+
+        if appointment.status != "completed":
+            return Response(
+                {"error": "You can only review a completed appointment."},
+                status=status.HTTP_400_BAD_REQUEST,
+            )
+
+        if ProviderReview.objects.filter(appointment=appointment).exists():
+            return Response(
+                {"error": "This appointment has already been reviewed."},
+                status=status.HTTP_400_BAD_REQUEST,
+            )
+
+        serializer = ProviderReviewCreateSerializer(data=request.data)
+        if not serializer.is_valid():
+            return Response(serializer.errors, status=status.HTTP_400_BAD_REQUEST)
+
+        review = serializer.save(
+            provider=provider,
+            appointment=appointment,
+            patient_identity=appointment.patient_identity,
+            patient_first_name=appointment.patient_first_name,
+            patient_last_name=appointment.patient_last_name,
+        )
+
+        return Response(
+            ProviderReviewPublicSerializer(review).data,
+            status=status.HTTP_201_CREATED,
+        )
