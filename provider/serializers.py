@@ -1,4 +1,4 @@
-from .models import Service, HealthcareProvider, Form, Prescription, PrescriptionDrug, ProviderSchedule
+from .models import Service, HealthcareProvider, Form, Prescription, PrescriptionDrug, ProviderSchedule, ProviderReview
 from rest_framework import serializers
 
 
@@ -83,3 +83,25 @@ class ProviderScheduleSerializer(serializers.ModelSerializer):
             "created_at",
         ]
         read_only_fields = ["id", "created_at"]
+
+
+class ProviderReviewPublicSerializer(serializers.ModelSerializer):
+    """Public-facing serializer — deliberately excludes patient_last_name,
+    patient_identity, and appointment. Only first name, rating, comment,
+    and date are ever exposed."""
+    class Meta:
+        model = ProviderReview
+        fields = ["id", "patient_first_name", "rating", "comment", "created_at"]
+        read_only_fields = fields
+
+
+class ProviderReviewCreateSerializer(serializers.ModelSerializer):
+    class Meta:
+        model = ProviderReview
+        fields = ["id", "provider", "appointment", "rating", "comment", "created_at"]
+        read_only_fields = ["id", "provider", "created_at"]
+
+    def validate_rating(self, value):
+        if not (1 <= value <= 5):
+            raise serializers.ValidationError("Rating must be between 1 and 5.")
+        return value
