@@ -1,6 +1,8 @@
 from django.db import models
 import uuid
 from identity.models import Identity
+from django.db import models
+from django.core.exceptions import ValidationError
 
 
 class HealthcareProvider(models.Model):
@@ -226,3 +228,60 @@ class ProviderSchedule(models.Model):
     def __str__(self):
         title = self.service.name if self.service else "Schedule"
         return f"{title} ({self.start_date})"
+
+
+class ProviderReview(models.Model):
+    """A patient's star rating and comment for a provider. Tied to the
+    appointment that earned the right to review, so only patients who
+    actually had a completed consultation can leave one. Public-facing
+    display should only ever show patient_first_name — never
+    patient_last_name, patient_email, or patient_identity — to keep the
+    reviewer semi-anonymous while still attributable."""
+
+    provider = models.ForeignKey(
+        "provider.HealthcareProvider",
+        on_delete=models.CASCADE,
+        related_name="reviews",
+    )
+    appointment = models.OneToOneField(
+        "appointments.ProviderAppointment",
+        on_delete=models.CASCADE,
+        related_name="review",
+        help_text="The completed appointment this review is attached to. "
+                   "One review per appointment, which naturally limits a "
+                   "patient to one review per provider per visit.",
+    )
+    patient_identity = models.ForeignKey(
+        "identity.Identity",
+        on_delete=models.SET_NULL,
+        null=True,
+        blank=True,
+        related_name="provider_reviews",
+    )
+    patient_first_name = models.CharField(
+        max_length=255,
+        help_text="Denormalized at creation time — this is the only "
+                   "patient-identifying field ever exposed publicly.",
+    )
+    patient_last_name = models.CharField(
+        max_length=255,
+        blank=True,
+        help_text="Stored for moderation/support purposes only. Never "
+                   "serialize this field in any public-facing response.",
+    )
+    rating = models.PositiveSmallIntegerField(
+        help_text="1 to 5 stars."
+    )
+    comment = models.TextField(blank=True)
+    created_at = models.DateTimeField(auto_now_add=True)
+    updated_at = models.DateTimeField(auto_now=True)
+
+    class Meta:
+        ordering = ["-created_at"]
+
+    def clean(self):
+        if not (1 <= self.rating <= 5):
+            raise ValidationError("Rating must be between 1 and 5.")
+
+    def __str__(self):
+        return f"{self.patient_first_name} → {self.provider} ({self.rating}★)"
