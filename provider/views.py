@@ -793,12 +793,22 @@ class ProviderScheduleDetailView(APIView):
         return Response(status=status.HTTP_204_NO_CONTENT)
 
 
-class ProviderListView(APIView):
+cclass ProviderListView(APIView):
     def get(self, request):
         speciality = request.query_params.get("speciality", "")
         providers = HealthcareProvider.objects.select_related("identity").prefetch_related("services")
         if speciality:
             providers = providers.filter(speciality__icontains=speciality)
+
+        # Annotate rating aggregates in a single query per page load, rather
+        # than querying ProviderReview separately for every provider in the
+        # list (which would be an N+1 query pattern on a page showing many
+        # providers at once).
+        providers = providers.annotate(
+            avg_rating=Avg("reviews__rating"),
+            review_count=Count("reviews"),
+        )
+
         data = []
         for p in providers:
             if not p.profile_complete:
@@ -821,6 +831,8 @@ class ProviderListView(APIView):
                 "profile_picture_url": p.profile_picture_url or "",
                 "clinic_logo_url": getattr(p, "clinic_logo_url", "") or "",
                 "services": services,
+                "average_rating": round(p.avg_rating, 1) if p.avg_rating else None,
+                "review_count": p.review_count,
             })
         return Response(data)
 
