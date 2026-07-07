@@ -693,6 +693,8 @@ class ProviderDashboardStatsView(APIView):
         # Keeping seconds preserves that precision; the frontend formats it
         # as minutes+seconds (e.g. "1m 12s" or "45s") instead of losing it.
         avg_duration_seconds = round(avg_duration.total_seconds()) if avg_duration else 0
+...
+"avg_duration_seconds": avg_duration_seconds,
 
         pending_count = ProviderAppointment.objects.filter(
             provider=provider,
