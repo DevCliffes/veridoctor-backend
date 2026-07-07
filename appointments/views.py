@@ -37,7 +37,16 @@ def _stamp_actual_times(appointment, old_status, new_status):
     passed through in-progress (actual_start_time still empty), we use
     the scheduled start_time as a stand-in for actual_start_time rather
     than leaving duration uncomputable — less precise than a real
-    in-progress timestamp, but still meaningful."""
+    in-progress timestamp, but still meaningful.
+
+    That fallback is clamped to `now` via min(): if an appointment is
+    force-completed before its scheduled start_time has actually arrived
+    (e.g. a future-dated slot completed early for testing/demo purposes),
+    using the raw scheduled start_time here would put actual_start_time
+    in the future relative to actual_end_time (=now), producing a
+    negative duration downstream in ProviderDashboardStatsView's
+    "Avg. Duration" calculation. Clamping to whichever is earlier
+    guarantees actual_start_time <= now <= actual_end_time."""
     if new_status == old_status:
         return
     now = timezone.now()
@@ -47,7 +56,7 @@ def _stamp_actual_times(appointment, old_status, new_status):
         update_fields.append("actual_start_time")
     if new_status == "completed":
         if not appointment.actual_start_time:
-            appointment.actual_start_time = appointment.start_time
+            appointment.actual_start_time = min(appointment.start_time, now)
             update_fields.append("actual_start_time")
         if not appointment.actual_end_time:
             appointment.actual_end_time = now
@@ -659,11 +668,18 @@ class ProviderDashboardStatsView(APIView):
             start_time__date__gte=month_start,
         ).count()
 
+        # actual_end_time__gt=F("actual_start_time") is a defensive guard:
+        # it excludes any row where the "actual" timestamps are backwards
+        # or equal, so a single bad/legacy row (e.g. from an appointment
+        # force-completed before its scheduled time, pre-dating the fix in
+        # _stamp_actual_times above) can never drag the average negative
+        # or otherwise nonsensical again.
         completed_qs = ProviderAppointment.objects.filter(
             provider=provider,
             status="completed",
             actual_start_time__isnull=False,
             actual_end_time__isnull=False,
+            actual_end_time__gt=F("actual_start_time"),
         ).annotate(
             duration=ExpressionWrapper(
                 F("actual_end_time") - F("actual_start_time"), output_field=DurationField()
