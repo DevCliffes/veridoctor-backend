@@ -97,10 +97,6 @@ def _schedule_occurs_on(spec, day):
     if recurrence in ("weekly", "custom"):
         if _js_dow_abbr(day) not in (spec["recurrence_days"] or []):
             return False
-        # Determine which week `day` falls in relative to the schedule's
-        # own start_date, and only treat it as occurring every Nth such
-        # week, so interval-based schedules (e.g. "every 2 weeks on Mon")
-        # only match on the actual matching weeks rather than every week.
         interval = spec.get("recurrence_interval") or 1
         if interval <= 1:
             return True
@@ -167,15 +163,9 @@ def _compute_end_date_for_count(start_date, recurrence, recurrence_days, recurre
     """
     Walks forward from start_date counting matching occurrences (using the
     exact same occurrence logic as _schedule_occurs_on) until `count` has
-    been reached, and returns the date of the final (Nth) occurrence. This
-    is the real end_date for a recurrence_end_type="after" schedule -- it
-    must be computed, not assumed, because how many calendar days "N
-    occurrences" spans depends on recurrence type/days/interval.
+    been reached, and returns the date of the final (Nth) occurrence.
 
-    Bounded to MAX_OVERLAP_CHECK_DAYS from start_date as a safety limit;
-    if the count isn't reached within that window (e.g. absurdly large
-    count on a rare recurrence), returns the last occurrence found instead
-    of looping indefinitely.
+    Bounded to MAX_OVERLAP_CHECK_DAYS from start_date as a safety limit.
     """
     if not count or count <= 0:
         return start_date
@@ -200,7 +190,7 @@ def _compute_end_date_for_count(start_date, recurrence, recurrence_days, recurre
             if found >= count:
                 return last
         cursor += timedelta(days=1)
-    return last  # ran out of window before reaching count -- best effort
+    return last
 
 
 def _resolve_end_date(
@@ -214,20 +204,7 @@ def _resolve_end_date(
 ):
     """
     Computes the correct end_date to persist for a schedule, based on its
-    recurrence_end_type. Returns None if recurrence is "none" (end_date is
-    whatever the caller already set/validated), or if the fields needed to
-    compute it are missing (in which case the caller's original end_date,
-    whatever it was, is left untouched).
-
-    FIX: previously only the "never" case was handled (hardcoded to the
-    2099-12-31 sentinel), leaving "on_date" and "after" submissions to
-    pass whatever end_date the client sent straight through -- which for
-    this frontend's Schedule.tsx was a stray, unrelated date-range field
-    that has no connection to the actual recurrence end. That silently
-    truncated the recurrence's real valid window, causing
-    _check_schedule_overlap to treat those schedules as never occurring
-    past that stray date and missing genuine conflicts (see the Home
-    Service / Consultation July 11 overlap).
+    recurrence_end_type.
     """
     if not recurrence or recurrence == "none":
         return None
@@ -595,8 +572,6 @@ class PrescriptionView(APIView):
                 notes=request.data.get("notes", ""),
             )
 
-            # TEMP DEBUG: wrap each drug creation so any failure is visible in the
-            # API response itself, instead of a silent/opaque 500. Remove once fixed.
             drugs_data = request.data.get("drugs", [])
             drug_errors = []
             for i, drug in enumerate(drugs_data):
@@ -618,8 +593,6 @@ class PrescriptionView(APIView):
                     })
 
             if drug_errors:
-                # Prescription saved, but one or more drug rows failed.
-                # Return 200 with the failure details visible in the response body.
                 serializer = PrescriptionSerializer(prescription)
                 return Response(
                     {
@@ -638,9 +611,6 @@ class PrescriptionView(APIView):
         except Identity.DoesNotExist:
             return Response({"error": "Identity not found"}, status=status.HTTP_404_NOT_FOUND)
         except Exception as e:
-            # TEMP DEBUG: surface any other exception directly in the response body
-            # so the traceback is visible in DevTools Network -> Response, without
-            # needing access to Render logs. Remove once fixed.
             import traceback
             return Response(
                 {
@@ -705,10 +675,6 @@ class ProviderScheduleView(APIView):
             return Response({"error": "Identity not found"}, status=status.HTTP_404_NOT_FOUND)
         data = request.data.copy()
 
-        # FIX: previously only handled recurrence_end_type == "never"
-        # (defaulting to the 2099-12-31 sentinel) and let "on_date"/"after"
-        # submissions pass through with whatever end_date the client sent
-        # -- see _resolve_end_date's docstring for the full story.
         resolved_end_date = _resolve_end_date(
             recurrence=data.get("recurrence", "none"),
             end_type=data.get("recurrence_end_type"),
@@ -740,11 +706,6 @@ class ProviderScheduleDetailView(APIView):
             return Response({"error": "Schedule not found"}, status=status.HTTP_404_NOT_FOUND)
         data = request.data.copy()
 
-        # PATCH is partial, so fall back to the existing schedule's values
-        # for any field the request didn't touch -- otherwise e.g. patching
-        # only `location_type` on an "after"-type recurring schedule would
-        # see recurrence_count as missing and skip end_date resolution
-        # entirely, silently leaving/reverting it to something wrong.
         resolved_end_date = _resolve_end_date(
             recurrence=data.get("recurrence", schedule.recurrence),
             end_type=data.get("recurrence_end_type", schedule.recurrence_end_type),
@@ -759,10 +720,6 @@ class ProviderScheduleDetailView(APIView):
 
         serializer = ProviderScheduleSerializer(schedule, data=data, partial=True)
         if serializer.is_valid():
-            # PATCH is partial, so build the full resulting spec (existing
-            # fields overlaid with the incoming changes) for overlap
-            # checking rather than relying on validated_data alone, which
-            # may omit fields the request didn't touch.
             merged = _spec_from_schedule(schedule)
             merged.update(serializer.validated_data)
             new_spec = _spec_from_data(merged)
@@ -793,17 +750,16 @@ class ProviderScheduleDetailView(APIView):
         return Response(status=status.HTTP_204_NO_CONTENT)
 
 
-cclass ProviderListView(APIView):
+class ProviderListView(APIView):
     def get(self, request):
         speciality = request.query_params.get("speciality", "")
         providers = HealthcareProvider.objects.select_related("identity").prefetch_related("services")
         if speciality:
             providers = providers.filter(speciality__icontains=speciality)
 
-        # Annotate rating aggregates in a single query per page load, rather
-        # than querying ProviderReview separately for every provider in the
-        # list (which would be an N+1 query pattern on a page showing many
-        # providers at once).
+        # Annotate rating aggregates in a single query, rather than querying
+        # ProviderReview separately for every provider in the list (which
+        # would be an N+1 query pattern on a page showing many providers).
         providers = providers.annotate(
             avg_rating=Avg("reviews__rating"),
             review_count=Count("reviews"),
@@ -1019,7 +975,6 @@ class ProviderPhotoUploadView(APIView):
         provider.save(update_fields=["profile_picture_url"])
 
         return Response({"profile_picture_url": secure_url}, status=status.HTTP_200_OK)
-
 
 
 class ProviderReviewListView(APIView):
