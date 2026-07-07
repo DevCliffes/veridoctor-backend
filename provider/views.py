@@ -1011,10 +1011,12 @@ class ProviderPhotoUploadView(APIView):
 
 
 class ProviderReviewListView(APIView):
-    """Public: list reviews for a provider, first-name-only."""
-    def get(self, request, provider_id):
+    """GET: public list of reviews for a provider (first-name-only).
+    POST: patient submits a review for a completed appointment."""
+
+    def get(self, request, identity_id):
         try:
-            provider = HealthcareProvider.objects.get(id=provider_id)
+            provider = HealthcareProvider.objects.get(identity__id=identity_id)
         except HealthcareProvider.DoesNotExist:
             return Response({"error": "Provider not found"}, status=status.HTTP_404_NOT_FOUND)
 
@@ -1027,9 +1029,9 @@ class ProviderReviewListView(APIView):
             "reviews": ProviderReviewPublicSerializer(reviews, many=True).data,
         })
 
-    def post(self, request, provider_id):
+    def post(self, request, identity_id):
         try:
-            provider = HealthcareProvider.objects.get(id=provider_id)
+            provider = HealthcareProvider.objects.get(identity__id=identity_id)
         except HealthcareProvider.DoesNotExist:
             return Response({"error": "Provider not found"}, status=status.HTTP_404_NOT_FOUND)
 
