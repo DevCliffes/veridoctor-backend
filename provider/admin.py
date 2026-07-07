@@ -1,4 +1,5 @@
 from django.contrib import admin
+from .models import ProviderReview
 from django.utils.html import format_html
 from .models import Service, HealthcareProvider, Form, Prescription, PrescriptionDrug, ProviderSchedule
 
@@ -40,3 +41,4 @@ admin.site.register(Form)
 admin.site.register(Prescription)
 admin.site.register(PrescriptionDrug)
 admin.site.register(ProviderSchedule)
+admin.site.register(ProviderReview)
