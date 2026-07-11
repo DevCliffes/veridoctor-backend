@@ -9,8 +9,14 @@ If you add a new endpoint that reads or writes clinical/billing data,
 follow this same pattern — don't bypass log_access "just this once".
 """
 
+import os
+
 from django.db.models import Q
-from rest_framework import viewsets, permissions
+from rest_framework import viewsets, permissions, status
+from rest_framework.parsers import MultiPartParser
+from rest_framework.permissions import IsAuthenticated
+from rest_framework.response import Response
+from rest_framework.views import APIView
 
 from . import models, serializers
 from .audit import log_access
@@ -170,3 +176,72 @@ class PatientRecordAccessLogViewSet(viewsets.ReadOnlyModelViewSet):
             | Q(patient__encounters__facility__owner__identity=user)
             | Q(patient__encounters__facility__managers__identity=user)
         ).distinct()
+
+
+class LabResultFileUploadView(APIView):
+    """
+    Uploads a lab result file straight to Cloudinary and stores only the
+    resulting secure_url on LabResult.result_file. The file is never
+    written to local disk — this service's filesystem is ephemeral, so a
+    Django FileField writing to MEDIA_ROOT would silently lose the file on
+    the next deploy/restart. Mirrors provider.views.ProviderGenericImageUploadView.
+    """
+    permission_classes = [IsAuthenticated, CanAccessPatientRecord]
+    parser_classes = [MultiPartParser]
+
+    def post(self, request, lab_result_id):
+        import cloudinary
+        import cloudinary.uploader
+
+        try:
+            lab_result = models.LabResult.objects.select_related(
+                "lab_order__encounter__patient"
+            ).get(id=lab_result_id)
+        except models.LabResult.DoesNotExist:
+            return Response({"error": "Lab result not found"}, status=status.HTTP_404_NOT_FOUND)
+
+        patient = lab_result.lab_order.encounter.patient
+        self.check_object_permissions(request, patient)
+
+        file = request.FILES.get("file")
+        if not file:
+            return Response({"error": "No file provided"}, status=status.HTTP_400_BAD_REQUEST)
+
+        cloud_name = os.environ.get("CLOUDINARY_CLOUD_NAME")
+        api_key = os.environ.get("CLOUDINARY_API_KEY")
+        api_secret = os.environ.get("CLOUDINARY_API_SECRET")
+        if not all([cloud_name, api_key, api_secret]):
+            return Response(
+                {"error": "Cloudinary not configured"},
+                status=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            )
+
+        cloudinary.config(cloud_name=cloud_name, api_key=api_key, api_secret=api_secret, secure=True)
+
+        try:
+            result = cloudinary.uploader.upload(
+                file,
+                folder=f"veridoctor/labresults/{patient.id}",
+                public_id=str(lab_result.id),
+                overwrite=True,
+                resource_type="auto",
+            )
+        except Exception as e:
+            return Response({"error": f"Upload failed: {str(e)}"}, status=status.HTTP_502_BAD_GATEWAY)
+
+        url = result.get("secure_url")
+        if not url:
+            return Response({"error": "No URL returned from Cloudinary"}, status=status.HTTP_502_BAD_GATEWAY)
+
+        lab_result.result_file = url
+        lab_result.save(update_fields=["result_file"])
+
+        log_access(
+            patient=patient,
+            accessed_by=request.user,
+            action="UPDATE",
+            resource=f"LabResult:{lab_result.pk}",
+            request=request,
+        )
+
+        return Response({"result_file": url}, status=status.HTTP_200_OK)
