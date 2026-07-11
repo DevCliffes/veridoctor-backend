@@ -111,6 +111,7 @@ INSTALLED_APPS = [
     "shared",
     "records",
     "notifications",
+    "hmis"
 ]
 
 REST_FRAMEWORK = {
