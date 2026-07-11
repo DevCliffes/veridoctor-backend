@@ -1,3 +1,4 @@
+from django.urls import path
 from rest_framework.routers import DefaultRouter
 from . import views
 
@@ -11,4 +12,10 @@ router.register("lab-orders", views.LabOrderViewSet, basename="laborder")
 router.register("invoices", views.InvoiceViewSet, basename="invoice")
 router.register("access-logs", views.PatientRecordAccessLogViewSet, basename="patientrecordaccesslog")
 
-urlpatterns = router.urls
+urlpatterns = router.urls + [
+    path(
+        "lab-results/<uuid:lab_result_id>/upload/",
+        views.LabResultFileUploadView.as_view(),
+        name="labresult-upload",
+    ),
+]
