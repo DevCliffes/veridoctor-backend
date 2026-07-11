@@ -5,7 +5,6 @@ from . import models
 @admin.register(models.PatientRecordAccessLog)
 class PatientRecordAccessLogAdmin(admin.ModelAdmin):
     """Read-only: this is an audit trail, not editable data."""
-
     list_display = ("patient", "accessed_by", "action", "resource", "accessed_at")
     list_filter = ("action",)
     readonly_fields = [f.name for f in models.PatientRecordAccessLog._meta.fields]
@@ -41,12 +40,17 @@ class ClinicalNoteAdmin(admin.ModelAdmin):
         return not (obj and obj.is_signed)
 
 
+@admin.register(models.LabResult)
+class LabResultAdmin(admin.ModelAdmin):
+    list_display = ("id", "lab_order", "is_abnormal", "result_file", "resulted_at")
+    list_filter = ("is_abnormal",)
+
+
 admin.site.register(models.VitalSigns)
 admin.site.register(models.ClinicalNoteAddendum)
 admin.site.register(models.Diagnosis)
 admin.site.register(models.MedicationOrder)
 admin.site.register(models.LabOrder)
-admin.site.register(models.LabResult)
 admin.site.register(models.Invoice)
 admin.site.register(models.InvoiceLineItem)
 admin.site.register(models.Payment)
