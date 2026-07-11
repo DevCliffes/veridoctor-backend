@@ -19,4 +19,5 @@ urlpatterns = [
     path("records/", include("records.urls")),
     path("appointments/", include("appointments.urls")),
     path("notifications/", include("notifications.urls")),
+    path("api/hmis/", include("hmis.urls")),
 ]
