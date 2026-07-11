@@ -208,7 +208,12 @@ class LabOrder(BaseModel):
 class LabResult(BaseModel):
     lab_order = models.OneToOneField(LabOrder, on_delete=models.CASCADE, related_name="result")
     result_value = models.TextField(blank=True, default="")
-    result_file = models.FileField(upload_to="lab_results/%Y/%m/", null=True, blank=True)
+    # Stores a Cloudinary secure_url, never a local path — this service's
+    # filesystem is ephemeral, so a Django FileField writing to MEDIA_ROOT
+    # would silently lose the file on the next deploy/restart. Uploaded via
+    # LabResultFileUploadView (see views.py), same pattern as
+    # provider.views.ProviderGenericImageUploadView.
+    result_file = models.CharField(max_length=500, blank=True, default="")
     reference_range = models.CharField(max_length=255, blank=True, default="")
     is_abnormal = models.BooleanField(default=False)
     reviewed_by = models.ForeignKey(
