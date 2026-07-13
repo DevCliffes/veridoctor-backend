@@ -83,6 +83,70 @@ class RegisterView(APIView):
     def post(self, request):
         if not request.data:
             return Response({"error": "bad request"}, status=status.HTTP_400_BAD_REQUEST)
+
+        email = request.data.get("email")
+
+        # FIX: previously any duplicate email — verified or not — hit
+        # IdentitySerializer's UniqueValidator and dead-ended the signup
+        # form with a raw "already exists" error, even for someone who'd
+        # started signup before, never got/used the OTP, and was simply
+        # trying again. We now distinguish the two cases explicitly:
+        #   - email belongs to an already-verified account -> real
+        #     duplicate, keep the exact same error shape as before so
+        #     nothing downstream (frontend error parsing) breaks.
+        #   - email belongs to an unverified account -> treat this as
+        #     "resume verification", not a new registration: issue a
+        #     fresh OTP against the existing identity and hand the
+        #     frontend enough to redirect straight to the OTP screen.
+        if email:
+            existing = Identity.objects.filter(email=email).first()
+            if existing:
+                if existing.email_verified:
+                    return Response(
+                        {"email": ["user with this email already exists"]},
+                        status=status.HTTP_400_BAD_REQUEST,
+                    )
+
+                otp = generate_code(length=6, digits_only=True)
+                print(f"DEBUG OTP resend for unverified {email}: {otp}", flush=True)
+                Otp.objects.update_or_create(
+                    identity_ref=existing,
+                    defaults={
+                        "code": otp,
+                        "is_used": False,
+                        "send_via": "EMAIL",
+                        "purpose": "VERIFICATION",
+                        "created_at": timezone.now(),
+                    },
+                )
+                message = (
+                    f"Your email address was used to create an account with "
+                    f"veridoctor, use the code {otp} to verify your email "
+                    f"address and complete account creation. This code will "
+                    f"be valid for the next 10 minutes"
+                )
+                import threading
+                import requests
+
+                def send_brevo_email():
+                    requests.post(
+                        "https://api.brevo.com/v3/smtp/email",
+                        headers={"api-key": os.environ.get("BREVO_API_KEY"), "Content-Type": "application/json"},
+                        json={
+                            "sender": {"name": "Veridoctor", "email": FROM_EMAIL},
+                            "to": [{"email": existing.email}],
+                            "subject": "ACCOUNT VERIFICATION",
+                            "textContent": message,
+                        },
+                    )
+
+                threading.Thread(target=send_brevo_email).start()
+
+                return Response(
+                    {"id": str(existing.id), "requires_verification": True},
+                    status=status.HTTP_200_OK,
+                )
+
         otp = generate_code(length=6, digits_only=True)
         print(f"DEBUG OTP for {request.data.get('email')}: {otp}", flush=True)
         message = f"Your email address was used to create an account with veridoctor, use the code {otp} to verify your email address and complete account creation. This code will be valid for the next 10 minutes"
@@ -118,8 +182,6 @@ class RegisterView(APIView):
             return Response({"error": "bad request"}, status=status.HTTP_400_BAD_REQUEST)
         identity = get_object_or_404(Identity, id=identity_id)
 
-        # Save insurances to patientAccount if provided — strip it from the
-        # payload first so IdentitySerializer doesn't see an unknown field.
         insurances = request.data.get("insurances", None)
         if insurances is not None:
             try:
@@ -130,7 +192,6 @@ class RegisterView(APIView):
             except Exception:
                 pass
 
-        # Update Identity fields (first_name, last_name, phone_number, gender etc.)
         identity_data = {
             k: v for k, v in request.data.items() if k != "insurances"
         }
@@ -138,7 +199,6 @@ class RegisterView(APIView):
         serializer.is_valid(raise_exception=True)
         serializer.save()
 
-        # Return the updated data including insurances
         response_data = serializer.data
         try:
             account = patientAccount.objects.filter(identity=identity).first()
@@ -157,7 +217,6 @@ class RegisterView(APIView):
         identity.deleted_at = timezone.now()
         identity.save()
         return Response({}, status=status.HTTP_204_NO_CONTENT)
-
 
 class LoginView(APIView):
     # FIX: explicitly public. Previously this view had no authentication_classes
