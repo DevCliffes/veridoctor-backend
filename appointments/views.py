@@ -1,6 +1,6 @@
 from django.db import transaction
 from django.utils import timezone
-from django.db.models import Avg, F, ExpressionWrapper, DurationField, Count, Sum
+from django.db.models import Avg, F, ExpressionWrapper, DurationField, Count, Sum, Min
 from datetime import timedelta
 from identity.models import Identity
 from provider.models import HealthcareProvider, Prescription, PrescriptionDrug
@@ -295,15 +295,6 @@ class PatientAppointmentView(APIView):
         return Response(data)
 
     def post(self, request):
-        # FIX: this view previously called serializer.save() with no
-        # provider= kwarg at all, even though ProviderAppointment.provider
-        # is a required, non-nullable FK and ProviderAppointmentSerializer
-        # doesn't include "provider" in its fields. Any request that
-        # actually reached this path would have failed. Provider is now
-        # required explicitly, exactly like ProviderAppointmentView does
-        # via its identity_id URL segment -- the only difference is this
-        # view takes it from the request body since there's no URL segment
-        # to source it from.
         provider_id = request.data.get("provider")
         if not provider_id:
             return Response({"error": "provider is required"}, status=status.HTTP_400_BAD_REQUEST)
@@ -501,13 +492,6 @@ class ProviderAppointmentView(APIView):
         start_time = serializer.validated_data["start_time"]
         end_time = serializer.validated_data["end_time"]
 
-        # FIX: this is the actual double-booking bug -- previously nothing
-        # here checked whether the requested start_time/end_time already
-        # overlapped an existing active appointment for this provider
-        # before saving. Two requests for the same slot (concurrent, or
-        # even just seconds apart) both succeeded silently. See
-        # _lock_provider_for_booking's docstring for why a plain overlap
-        # query alone isn't sufficient to close the race.
         with transaction.atomic():
             _lock_provider_for_booking(provider.id)
             conflict = _get_overlapping_appointment(provider, start_time, end_time)
@@ -771,6 +755,98 @@ class ProviderDashboardStatsView(APIView):
         ).aggregate(total=Sum("service__price"))
         revenue_mtd = revenue_mtd_agg["total"] or 0
 
+        # New vs returning patients this month. A patient is "new" if the
+        # earliest appointment they've ever had with this provider also
+        # falls within the current month — i.e. this month is their first
+        # contact. Otherwise they're "returning" (they had at least one
+        # appointment with this provider before month_start).
+        emails_this_month = set(
+            ProviderAppointment.objects.filter(
+                provider=provider,
+                start_time__date__gte=month_start,
+            )
+            .exclude(patient_email="")
+            .values_list("patient_email", flat=True)
+            .distinct()
+        )
+
+        new_patients_month = 0
+        returning_patients_month = 0
+
+        if emails_this_month:
+            first_appointment_by_email = (
+                ProviderAppointment.objects.filter(
+                    provider=provider,
+                    patient_email__in=emails_this_month,
+                )
+                .values("patient_email")
+                .annotate(first_appt=Min("start_time"))
+            )
+
+            for row in first_appointment_by_email:
+                if row["first_appt"].date() >= month_start:
+                    new_patients_month += 1
+                else:
+                    returning_patients_month += 1
+
+        # Completion rate this month — completed vs no-show vs cancelled.
+        # Scheduled/confirmed/in-progress appointments are excluded from
+        # the denominator since they haven't resolved to an outcome yet;
+        # counting them would understate the rate for the current month
+        # while appointments are still in flight.
+        status_counts_month = (
+            ProviderAppointment.objects.filter(
+                provider=provider,
+                start_time__date__gte=month_start,
+            )
+            .values("status")
+            .annotate(count=Count("id"))
+        )
+        status_count_map = {row["status"]: row["count"] for row in status_counts_month}
+
+        completed_count = status_count_map.get("completed", 0)
+        no_show_count = status_count_map.get("no-show", 0)
+        cancelled_count = status_count_map.get("cancelled", 0)
+        completion_denominator = completed_count + no_show_count + cancelled_count
+        completion_rate = (
+            round((completed_count / completion_denominator) * 100)
+            if completion_denominator > 0 else 0
+        )
+
+        # Virtual vs in-person split this month, across all statuses (not
+        # just completed) — this describes how patients are choosing to
+        # book, independent of whether the appointment has happened yet.
+        type_counts_month = (
+            ProviderAppointment.objects.filter(
+                provider=provider,
+                start_time__date__gte=month_start,
+            )
+            .values("appointment_type")
+            .annotate(count=Count("id"))
+        )
+        type_count_map = {row["appointment_type"]: row["count"] for row in type_counts_month}
+        virtual_count = type_count_map.get("virtual", 0)
+        physical_count = type_count_map.get("physical", 0)
+
+        # Revenue by service this month — same completed + priced-service
+        # filter as revenue_mtd above, just grouped instead of summed flat,
+        # so revenue_by_service always sums back to revenue_mtd.
+        revenue_by_service_qs = (
+            ProviderAppointment.objects.filter(
+                provider=provider,
+                status="completed",
+                start_time__date__gte=month_start,
+                service__price__isnull=False,
+            )
+            .values("service__name")
+            .annotate(total=Sum("service__price"))
+            .order_by("-total")
+        )
+        revenue_by_service = [
+            {"service_name": row["service__name"] or "Unspecified", "revenue": float(row["total"])}
+            for row in revenue_by_service_qs
+        ]
+
         DAY_ABBR = ["Mon", "Tue", "Wed", "Thu", "Fri", "Sat", "Sun"]
         weekly_data = []
         for i in range(6, -1, -1):
@@ -793,4 +869,13 @@ class ProviderDashboardStatsView(APIView):
             "pending_count": pending_count,
             "weekly_data": weekly_data,
             "revenue_mtd": float(revenue_mtd),
+            "new_patients_month": new_patients_month,
+            "returning_patients_month": returning_patients_month,
+            "completed_count": completed_count,
+            "no_show_count": no_show_count,
+            "cancelled_count": cancelled_count,
+            "completion_rate": completion_rate,
+            "virtual_count": virtual_count,
+            "physical_count": physical_count,
+            "revenue_by_service": revenue_by_service,
         })
