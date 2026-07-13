@@ -1,3 +1,4 @@
+from django.db import transaction
 from django.utils import timezone
 from django.db.models import Avg, F, ExpressionWrapper, DurationField, Count, Sum
 from datetime import timedelta
@@ -9,6 +10,42 @@ from rest_framework.views import APIView
 from .models import ProviderAppointment, AppointmentCapture
 from .serializers import ProviderAppointmentSerializer, AppointmentCaptureSerializer
 from records.services import find_identity_by_email, refresh_record_summary
+
+
+# Statuses that occupy a real slot on the calendar — a cancelled or
+# no-show appointment shouldn't block someone else from booking that time.
+ACTIVE_APPOINTMENT_STATUSES = ["scheduled", "confirmed", "in-progress"]
+
+
+def _lock_provider_for_booking(provider_id):
+    """
+    Locks the HealthcareProvider row for the duration of the current
+    transaction. This is the actual fix for the double-booking race —
+    a plain "check for conflicts, then create" is not safe on its own:
+    if no conflicting appointment exists yet, select_for_update() on the
+    appointments query has nothing to lock, so two simultaneous requests
+    can both pass the check before either one's INSERT commits.
+
+    Locking the provider row instead means the second concurrent request
+    to book *this provider* blocks until the first request's transaction
+    fully commits or rolls back — so by the time it runs its own overlap
+    check, the first booking (if it succeeded) is already visible to it.
+    This does serialize all bookings for a single provider, but booking
+    volume per provider is low enough that this is not a bottleneck.
+    """
+    return HealthcareProvider.objects.select_for_update().get(id=provider_id)
+
+
+def _get_overlapping_appointment(provider, start_time, end_time, exclude_id=None):
+    qs = ProviderAppointment.objects.filter(
+        provider=provider,
+        status__in=ACTIVE_APPOINTMENT_STATUSES,
+        start_time__lt=end_time,
+        end_time__gt=start_time,
+    )
+    if exclude_id:
+        qs = qs.exclude(id=exclude_id)
+    return qs.first()
 
 
 def _notify(recipient_identity, notification_type, title, message="", link=""):
@@ -258,26 +295,46 @@ class PatientAppointmentView(APIView):
         return Response(data)
 
     def post(self, request):
+        # FIX: this view previously called serializer.save() with no
+        # provider= kwarg at all, even though ProviderAppointment.provider
+        # is a required, non-nullable FK and ProviderAppointmentSerializer
+        # doesn't include "provider" in its fields. Any request that
+        # actually reached this path would have failed. Provider is now
+        # required explicitly, exactly like ProviderAppointmentView does
+        # via its identity_id URL segment -- the only difference is this
+        # view takes it from the request body since there's no URL segment
+        # to source it from.
         provider_id = request.data.get("provider")
-        if provider_id:
-            try:
-                provider = HealthcareProvider.objects.get(id=provider_id)
-            except HealthcareProvider.DoesNotExist:
-                return Response(
-                    {"error": "Provider not found"},
-                    status=status.HTTP_404_NOT_FOUND,
-                )
-            if not provider.profile_complete:
-                return Response(
-                    {"error": "This provider is not currently accepting bookings."},
-                    status=status.HTTP_400_BAD_REQUEST,
-                )
+        if not provider_id:
+            return Response({"error": "provider is required"}, status=status.HTTP_400_BAD_REQUEST)
+
+        try:
+            provider = HealthcareProvider.objects.get(id=provider_id)
+        except HealthcareProvider.DoesNotExist:
+            return Response({"error": "Provider not found"}, status=status.HTTP_404_NOT_FOUND)
+
+        if not provider.profile_complete:
+            return Response(
+                {"error": "This provider is not currently accepting bookings."},
+                status=status.HTTP_400_BAD_REQUEST,
+            )
 
         serializer = ProviderAppointmentSerializer(data=request.data)
         if not serializer.is_valid():
             return Response(serializer.errors, status=status.HTTP_400_BAD_REQUEST)
 
-        appointment = serializer.save()
+        start_time = serializer.validated_data["start_time"]
+        end_time = serializer.validated_data["end_time"]
+
+        with transaction.atomic():
+            _lock_provider_for_booking(provider.id)
+            conflict = _get_overlapping_appointment(provider, start_time, end_time)
+            if conflict:
+                return Response(
+                    {"error": "This time slot was just booked by someone else. Please choose another time."},
+                    status=status.HTTP_409_CONFLICT,
+                )
+            appointment = serializer.save(provider=provider)
 
         patient_identity = find_identity_by_email(appointment.patient_email)
         if patient_identity:
@@ -441,7 +498,25 @@ class ProviderAppointmentView(APIView):
         if not serializer.is_valid():
             return Response(serializer.errors, status=status.HTTP_400_BAD_REQUEST)
 
-        appointment = serializer.save(provider=provider)
+        start_time = serializer.validated_data["start_time"]
+        end_time = serializer.validated_data["end_time"]
+
+        # FIX: this is the actual double-booking bug -- previously nothing
+        # here checked whether the requested start_time/end_time already
+        # overlapped an existing active appointment for this provider
+        # before saving. Two requests for the same slot (concurrent, or
+        # even just seconds apart) both succeeded silently. See
+        # _lock_provider_for_booking's docstring for why a plain overlap
+        # query alone isn't sufficient to close the race.
+        with transaction.atomic():
+            _lock_provider_for_booking(provider.id)
+            conflict = _get_overlapping_appointment(provider, start_time, end_time)
+            if conflict:
+                return Response(
+                    {"error": "This time slot was just booked by someone else. Please choose another time."},
+                    status=status.HTTP_409_CONFLICT,
+                )
+            appointment = serializer.save(provider=provider)
 
         patient_identity = find_identity_by_email(appointment.patient_email)
         if patient_identity:
@@ -668,12 +743,6 @@ class ProviderDashboardStatsView(APIView):
             start_time__date__gte=month_start,
         ).count()
 
-        # actual_end_time__gt=F("actual_start_time") is a defensive guard:
-        # it excludes any row where the "actual" timestamps are backwards
-        # or equal, so a single bad/legacy row (e.g. from an appointment
-        # force-completed before its scheduled time, pre-dating the fix in
-        # _stamp_actual_times above) can never drag the average negative
-        # or otherwise nonsensical again.
         completed_qs = ProviderAppointment.objects.filter(
             provider=provider,
             status="completed",
@@ -686,12 +755,6 @@ class ProviderDashboardStatsView(APIView):
             )
         )
         avg_duration = completed_qs.aggregate(avg=Avg("duration"))["avg"]
-        # Returned in whole seconds rather than pre-rounded to minutes: with
-        # short test/demo consultations (a few seconds each), rounding to
-        # the nearest minute collapses a real, non-zero average down to 0,
-        # which the dashboard then can't distinguish from "no data yet."
-        # Keeping seconds preserves that precision; the frontend formats it
-        # as minutes+seconds (e.g. "1m 12s" or "45s") instead of losing it.
         avg_duration_seconds = round(avg_duration.total_seconds()) if avg_duration else 0
 
         pending_count = ProviderAppointment.objects.filter(
