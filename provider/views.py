@@ -20,6 +20,7 @@ from .models import (
     PrescriptionDrug,
     ProviderSchedule,
     ProviderReview,
+    ProviderDocumentReview,
 )
 from .serializers import (
     ServiceSerializer,
@@ -28,6 +29,7 @@ from .serializers import (
     ProviderScheduleSerializer,
     ProviderReviewPublicSerializer,
     ProviderReviewCreateSerializer,
+    ProviderDocumentReviewSerializer,
 )
 
 
@@ -265,6 +267,28 @@ def _check_schedule_overlap(provider, new_spec, exclude_schedule_id=None):
     return None
 
 
+def _reset_document_review(provider, field_name, url):
+    """
+    Called every time a provider (re)uploads one of the fixed document
+    fields. Always resets that field's review to "pending" -- even if it
+    was previously "approved" -- because the file behind the URL has
+    changed and an old approval shouldn't silently apply to a new file.
+    An admin must explicitly re-approve the new upload.
+    """
+    ProviderDocumentReview.objects.update_or_create(
+        provider=provider,
+        field_name=field_name,
+        defaults={
+            "document_url": url,
+            "status": ProviderDocumentReview.STATUS_PENDING,
+            "rejection_category": "",
+            "rejection_reason": "",
+            "reviewed_at": None,
+            "reviewed_by": None,
+        },
+    )
+
+
 class ProviderProfileView(APIView):
     def get(self, request, identity_id):
         try:
@@ -388,6 +412,10 @@ class ProviderDocumentUploadView(APIView):
 
         setattr(provider, field_name, url)
         provider.save(update_fields=[field_name])
+
+        # Every (re)upload resets this document's review to "pending",
+        # regardless of any prior approval -- see _reset_document_review.
+        _reset_document_review(provider, field_name, url)
 
         return Response({"url": url}, status=status.HTTP_200_OK)
 
@@ -1046,3 +1074,27 @@ class ProviderReviewListView(APIView):
             ProviderReviewPublicSerializer(review).data,
             status=status.HTTP_201_CREATED,
         )
+
+
+class ProviderDocumentReviewListView(APIView):
+    """
+    Read-only: lets a provider see the review status of every document
+    they've submitted, including why anything was rejected (a structured
+    category -- incorrect / unclear / incomplete / other -- plus a
+    free-text reason) so they know exactly what to fix and re-upload.
+
+    Only fields the provider has actually uploaded at least once will
+    appear here (rows are created lazily on first upload -- see
+    _reset_document_review in ProviderDocumentUploadView.post).
+    """
+
+    def get(self, request, identity_id):
+        try:
+            identity = Identity.objects.get(id=identity_id)
+            provider = HealthcareProvider.objects.get(identity=identity)
+        except (Identity.DoesNotExist, HealthcareProvider.DoesNotExist):
+            return Response({"error": "Provider not found"}, status=status.HTTP_404_NOT_FOUND)
+
+        reviews = ProviderDocumentReview.objects.filter(provider=provider)
+        serializer = ProviderDocumentReviewSerializer(reviews, many=True)
+        return Response(serializer.data, status=status.HTTP_200_OK)
