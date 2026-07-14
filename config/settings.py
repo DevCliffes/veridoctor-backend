@@ -390,6 +390,47 @@ UNFOLD = {
                     },
                 ],
             },
+            {
+                # New section: lets an admin jump straight to the document
+                # review queue (see provider/admin.py ->
+                # ProviderDocumentReviewAdmin) without hunting through
+                # "Healthcare providers" first.
+                "title": _("Document Reviews"),
+                "separator": True,
+                "items": [
+                    {
+                        "title": _("All document reviews"),
+                        "icon": "fact_check",
+                        "link": reverse_lazy(
+                            "admin:provider_providerdocumentreview_changelist"
+                        ),
+                    },
+                    {
+                        "title": _("Pending review"),
+                        "icon": "hourglass_empty",
+                        "link": lambda request: (
+                            reverse_lazy(
+                                "admin:provider_providerdocumentreview_changelist"
+                            )
+                            + "?status__exact=pending"
+                        ),
+                        # Shows a live count badge next to this nav item.
+                        # Requires pending_document_reviews_badge() to be
+                        # defined in config/unfold_helpers.py (see below).
+                        "badge": "config.unfold_helpers.pending_document_reviews_badge",
+                    },
+                    {
+                        "title": _("Rejected"),
+                        "icon": "cancel",
+                        "link": lambda request: (
+                            reverse_lazy(
+                                "admin:provider_providerdocumentreview_changelist"
+                            )
+                            + "?status__exact=rejected"
+                        ),
+                    },
+                ],
+            },
         ],
     },
 }
