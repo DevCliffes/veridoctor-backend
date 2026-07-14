@@ -1,7 +1,14 @@
-from .models import Service, HealthcareProvider, Form, Prescription, PrescriptionDrug, ProviderSchedule, ProviderReview
+from .models import (
+    Service,
+    HealthcareProvider,
+    Form,
+    Prescription,
+    PrescriptionDrug,
+    ProviderSchedule,
+    ProviderReview,
+    ProviderDocumentReview,
+)
 from rest_framework import serializers
-
-
 class ServiceSerializer(serializers.ModelSerializer):
     class Meta:
         model = Service
@@ -16,22 +23,16 @@ class ServiceSerializer(serializers.ModelSerializer):
             "created_at",
         ]
         read_only_fields = ["id", "created_at"]
-
-
 class FormSerializer(serializers.ModelSerializer):
     class Meta:
         model = Form
         fields = ["id", "name", "sections", "created_at", "updated_at"]
         read_only_fields = ["id", "created_at", "updated_at"]
-
-
 class PrescriptionDrugSerializer(serializers.ModelSerializer):
     class Meta:
         model = PrescriptionDrug
         fields = ["id", "drug_name", "dosage", "frequency", "duration", "instructions"]
         read_only_fields = ["id"]
-
-
 class PrescriptionSerializer(serializers.ModelSerializer):
     drugs = PrescriptionDrugSerializer(many=True, read_only=True)
     provider = serializers.SerializerMethodField()
@@ -58,8 +59,6 @@ class PrescriptionSerializer(serializers.ModelSerializer):
             "last_name": getattr(identity, "last_name", ""),
             "speciality": obj.provider.speciality,
         }
-
-
 class ProviderScheduleSerializer(serializers.ModelSerializer):
     service_name = serializers.CharField(source="service.name", read_only=True, default=None)
     class Meta:
@@ -83,8 +82,6 @@ class ProviderScheduleSerializer(serializers.ModelSerializer):
             "created_at",
         ]
         read_only_fields = ["id", "created_at"]
-
-
 class ProviderReviewPublicSerializer(serializers.ModelSerializer):
     """Public-facing serializer — deliberately excludes patient_last_name,
     patient_identity, and appointment. Only first name, rating, comment,
@@ -93,15 +90,40 @@ class ProviderReviewPublicSerializer(serializers.ModelSerializer):
         model = ProviderReview
         fields = ["id", "patient_first_name", "rating", "comment", "created_at"]
         read_only_fields = fields
-
-
 class ProviderReviewCreateSerializer(serializers.ModelSerializer):
     class Meta:
         model = ProviderReview
         fields = ["id", "provider", "appointment", "rating", "comment", "created_at"]
         read_only_fields = ["id", "provider", "created_at"]
-
     def validate_rating(self, value):
         if not (1 <= value <= 5):
             raise serializers.ValidationError("Rating must be between 1 and 5.")
         return value
+
+
+class ProviderDocumentReviewSerializer(serializers.ModelSerializer):
+    """Read-only view of a provider's per-document review status, used by
+    ProviderDocumentReviewListView so providers can see exactly what was
+    rejected and why (category + free-text reason) and re-upload
+    accordingly."""
+
+    field_label = serializers.CharField(source="get_field_name_display", read_only=True)
+    status_label = serializers.CharField(source="get_status_display", read_only=True)
+    rejection_category_label = serializers.CharField(
+        source="get_rejection_category_display", read_only=True
+    )
+
+    class Meta:
+        model = ProviderDocumentReview
+        fields = [
+            "field_name",
+            "field_label",
+            "status",
+            "status_label",
+            "document_url",
+            "rejection_category",
+            "rejection_category_label",
+            "rejection_reason",
+            "reviewed_at",
+        ]
+        read_only_fields = fields
