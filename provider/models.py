@@ -1,5 +1,6 @@
 from django.db import models
 import uuid
+from django.conf import settings
 from identity.models import Identity
 from django.db import models
 from django.core.exceptions import ValidationError
@@ -285,3 +286,80 @@ class ProviderReview(models.Model):
 
     def __str__(self):
         return f"{self.patient_first_name} → {self.provider} ({self.rating}★)"
+
+
+DOCUMENT_FIELD_CHOICES = [
+    ("national_id_image", "National ID"),
+    ("clinic_logo_url", "Clinic Logo"),
+    ("business_reg_image", "Business Registration"),
+    ("operating_licence_image", "Operating Licence"),
+    ("kra_pin_image", "KRA PIN"),
+    ("cr12_image", "CR12"),
+    ("valid_licence_image", "Valid Licence"),
+]
+
+
+class ProviderDocumentReview(models.Model):
+    """
+    Tracks approval status per individual document field on a provider,
+    rather than one status for the whole profile. Each row corresponds
+    to one document field (e.g. "national_id_image") for one provider.
+
+    Whenever a provider re-uploads a document (see
+    ProviderDocumentUploadView.post / _reset_document_review), the
+    matching row here is reset to "pending" regardless of its previous
+    state — so an admin's earlier approval never silently carries over
+    to a new file. Approved documents stay approved only until the
+    provider uploads a replacement.
+    """
+
+    STATUS_PENDING = "pending"
+    STATUS_APPROVED = "approved"
+    STATUS_REJECTED = "rejected"
+    STATUS_CHOICES = [
+        (STATUS_PENDING, "Pending review"),
+        (STATUS_APPROVED, "Approved"),
+        (STATUS_REJECTED, "Rejected"),
+    ]
+
+    # Structured reason category so the provider gets a clear, consistent
+    # signal about *what kind* of problem it was, in addition to whatever
+    # free-text detail the reviewer adds in rejection_reason.
+    REJECTION_INCORRECT = "incorrect"
+    REJECTION_UNCLEAR = "unclear"
+    REJECTION_INCOMPLETE = "incomplete"
+    REJECTION_OTHER = "other"
+    REJECTION_CATEGORY_CHOICES = [
+        (REJECTION_INCORRECT, "Incorrect document (wrong type / doesn't match provider)"),
+        (REJECTION_UNCLEAR, "Unclear (blurry, cropped, low resolution, glare)"),
+        (REJECTION_INCOMPLETE, "Incomplete (missing pages, expired, partial info)"),
+        (REJECTION_OTHER, "Other"),
+    ]
+
+    provider = models.ForeignKey(
+        HealthcareProvider,
+        on_delete=models.CASCADE,
+        related_name="document_reviews",
+    )
+    field_name = models.CharField(max_length=64, choices=DOCUMENT_FIELD_CHOICES)
+    document_url = models.URLField(blank=True, default="")
+    status = models.CharField(
+        max_length=16, choices=STATUS_CHOICES, default=STATUS_PENDING
+    )
+    rejection_category = models.CharField(
+        max_length=16, choices=REJECTION_CATEGORY_CHOICES, blank=True, default=""
+    )
+    rejection_reason = models.TextField(blank=True, default="")
+    reviewed_at = models.DateTimeField(null=True, blank=True)
+    reviewed_by = models.ForeignKey(
+        settings.AUTH_USER_MODEL, null=True, blank=True, on_delete=models.SET_NULL
+    )
+    created_at = models.DateTimeField(auto_now_add=True)
+    updated_at = models.DateTimeField(auto_now=True)
+
+    class Meta:
+        unique_together = ("provider", "field_name")
+        ordering = ["provider", "field_name"]
+
+    def __str__(self):
+        return f"{self.provider} — {self.get_field_name_display()} ({self.status})"
