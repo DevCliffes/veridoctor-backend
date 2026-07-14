@@ -317,6 +317,10 @@ class PatientAppointmentView(APIView):
         start_time = serializer.validated_data["start_time"]
         end_time = serializer.validated_data["end_time"]
 
+        # NOTE: Patients booking themselves through the public booking flow
+        # have no "instant" concept — only providers logging walk-ins/express
+        # calls do (see ProviderAppointmentView.post below). So this view
+        # always enforces the overlap check, unchanged.
         with transaction.atomic():
             _lock_provider_for_booking(provider.id)
             conflict = _get_overlapping_appointment(provider, start_time, end_time)
@@ -485,6 +489,16 @@ class ProviderAppointmentView(APIView):
         data = request.data.copy()
         data["provider"] = provider.id
 
+        # "Now" bookings (walk-ins / express virtual calls a provider is
+        # taking immediately) are allowed to bypass the normal slot-overlap
+        # check, since the whole point is to log an appointment that's
+        # already happening regardless of what else is on the calendar.
+        # Every other booking path — is_instant absent/false here, and
+        # PatientAppointmentView.post above, which has no concept of
+        # "instant" at all — still goes through the standard overlap check,
+        # unchanged from before.
+        is_instant = str(data.pop("is_instant", False)).lower() in ("true", "1")
+
         serializer = ProviderAppointmentSerializer(data=data)
         if not serializer.is_valid():
             return Response(serializer.errors, status=status.HTTP_400_BAD_REQUEST)
@@ -492,15 +506,22 @@ class ProviderAppointmentView(APIView):
         start_time = serializer.validated_data["start_time"]
         end_time = serializer.validated_data["end_time"]
 
-        with transaction.atomic():
-            _lock_provider_for_booking(provider.id)
-            conflict = _get_overlapping_appointment(provider, start_time, end_time)
-            if conflict:
-                return Response(
-                    {"error": "This time slot was just booked by someone else. Please choose another time."},
-                    status=status.HTTP_409_CONFLICT,
-                )
+        if is_instant:
+            # Deliberately skip _lock_provider_for_booking and
+            # _get_overlapping_appointment here: an instant/walk-in booking
+            # is intentionally allowed to land on top of an existing
+            # appointment.
             appointment = serializer.save(provider=provider)
+        else:
+            with transaction.atomic():
+                _lock_provider_for_booking(provider.id)
+                conflict = _get_overlapping_appointment(provider, start_time, end_time)
+                if conflict:
+                    return Response(
+                        {"error": "This time slot was just booked by someone else. Please choose another time."},
+                        status=status.HTTP_409_CONFLICT,
+                    )
+                appointment = serializer.save(provider=provider)
 
         patient_identity = find_identity_by_email(appointment.patient_email)
         if patient_identity:
