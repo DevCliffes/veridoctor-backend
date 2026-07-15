@@ -23,12 +23,14 @@ from .models import (
     HealthcareProviderAccount,
     AuthCode,
 )
+from .emails import send_otp_email
 import os
 from django.contrib.auth.tokens import PasswordResetTokenGenerator
 from django.db import IntegrityError, DatabaseError
 from .utils import generateAuthCode, generateaccessToken, generaterefreshtoken
 import jwt
 from typing import TypedDict
+import threading
 
 FRONTEND_URL = os.environ.get("FRONTEND_URL")
 ACCOUNT_TYPES = [
@@ -119,28 +121,13 @@ class RegisterView(APIView):
                         "created_at": timezone.now(),
                     },
                 )
-                message = (
-                    f"Your email address was used to create an account with "
-                    f"veridoctor, use the code {otp} to verify your email "
-                    f"address and complete account creation. This code will "
-                    f"be valid for the next 10 minutes"
-                )
-                import threading
-                import requests
 
-                def send_brevo_email():
-                    requests.post(
-                        "https://api.brevo.com/v3/smtp/email",
-                        headers={"api-key": os.environ.get("BREVO_API_KEY"), "Content-Type": "application/json"},
-                        json={
-                            "sender": {"name": "Veridoctor", "email": FROM_EMAIL},
-                            "to": [{"email": existing.email}],
-                            "subject": "ACCOUNT VERIFICATION",
-                            "textContent": message,
-                        },
-                    )
-
-                threading.Thread(target=send_brevo_email).start()
+                # Sent via Resend now instead of Brevo — send_otp_email()
+                # builds its own subject/HTML body from the code, so the
+                # old plaintext `message` string is no longer used here.
+                threading.Thread(
+                    target=send_otp_email, args=(existing.email, otp)
+                ).start()
 
                 return Response(
                     {"id": str(existing.id), "requires_verification": True},
@@ -149,7 +136,6 @@ class RegisterView(APIView):
 
         otp = generate_code(length=6, digits_only=True)
         print(f"DEBUG OTP for {request.data.get('email')}: {otp}", flush=True)
-        message = f"Your email address was used to create an account with veridoctor, use the code {otp} to verify your email address and complete account creation. This code will be valid for the next 10 minutes"
         serializer = IdentitySerializer(data=request.data)
         if serializer.is_valid():
             identity = serializer.save()
@@ -160,20 +146,12 @@ class RegisterView(APIView):
                 purpose="VERIFICATION",
             )
             identity_otp.save()
-            import threading
-            import requests
-            def send_brevo_email():
-                requests.post(
-                    "https://api.brevo.com/v3/smtp/email",
-                    headers={"api-key": os.environ.get("BREVO_API_KEY"), "Content-Type": "application/json"},
-                    json={
-                        "sender": {"name": "Veridoctor", "email": FROM_EMAIL},
-                        "to": [{"email": identity.email}],
-                        "subject": "ACCOUNT VERIFICATION",
-                        "textContent": message
-                    }
-                )
-            threading.Thread(target=send_brevo_email).start()
+
+            # Sent via Resend now instead of Brevo.
+            threading.Thread(
+                target=send_otp_email, args=(identity.email, otp)
+            ).start()
+
             return Response(serializer.data, status=status.HTTP_201_CREATED)
         return Response(serializer.errors, status=status.HTTP_400_BAD_REQUEST)
 
