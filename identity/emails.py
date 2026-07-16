@@ -1,5 +1,6 @@
 import os
 import json
+import threading
 import urllib.request
 import urllib.error
 
@@ -10,9 +11,8 @@ RESEND_API_URL = "https://api.resend.com/emails"
 
 def _send_via_resend(to_email: str, subject: str, html_body: str) -> bool:
     """
-    Shared low-level sender used by both send_otp_email() and
-    send_appointment_reminder_email() — one place to keep the actual
-    HTTP call, headers, and error handling in sync.
+    Shared low-level sender used by every email helper below — one place
+    to keep the actual HTTP call, headers, and error handling in sync.
     Returns True on success, False on failure — never raises.
     """
     if not RESEND_API_KEY:
@@ -49,9 +49,7 @@ def _send_via_resend(to_email: str, subject: str, html_body: str) -> bool:
 
 def send_otp_email(to_email: str, otp_code: str) -> bool:
     """
-    Sends an OTP verification email via Resend's REST API using only
-    the standard library (no extra Poetry dependency needed, so this
-    doesn't require a poetry.lock update).
+    Sends an OTP verification email via Resend's REST API.
     Returns True on success, False on failure — never raises, so a
     failed email doesn't crash the calling request.
     """
@@ -68,9 +66,18 @@ def send_otp_email(to_email: str, otp_code: str) -> bool:
 
 def send_appointment_reminder_email(to_email: str, subject: str, message: str) -> bool:
     """
-    Sends an appointment reminder email via Resend — same transport as
-    send_otp_email(), just a different subject/body. Used by
-    notifications/services.py's send_email_reminder().
+    Sends an appointment reminder email via Resend. Kept as a named
+    wrapper (rather than just calling send_notification_email directly)
+    so reminder call sites stay self-documenting.
+    """
+    return send_notification_email(to_email, subject, message)
+
+
+def send_notification_email(to_email: str, subject: str, message: str) -> bool:
+    """
+    Generic notification email — used for every notification-worthy
+    event: bookings, confirmations, cancellations, reschedules,
+    prescriptions, reminders, etc.
     """
     html_body = f"""
         <div style="font-family: sans-serif; max-width: 480px; margin: 0 auto;">
@@ -79,3 +86,15 @@ def send_appointment_reminder_email(to_email: str, subject: str, message: str) -
         </div>
     """
     return _send_via_resend(to_email, subject, html_body)
+
+
+def send_notification_email_async(to_email: str, subject: str, message: str) -> None:
+    """
+    Fire-and-forget version for use inside notify()/`_notify()` helpers,
+    so creating a notification never blocks on an outbound HTTP call.
+    """
+    if not to_email:
+        return
+    threading.Thread(
+        target=send_notification_email, args=(to_email, subject, message)
+    ).start()
