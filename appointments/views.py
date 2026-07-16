@@ -48,7 +48,7 @@ def _get_overlapping_appointment(provider, start_time, end_time, exclude_id=None
     return qs.first()
 
 
-ddef _notify(recipient_identity, notification_type, title, message="", link="", appointment=None, for_provider=False):
+def _notify(recipient_identity, notification_type, title, message="", link="", appointment=None, for_provider=False):
     """
     appointment / for_provider: when provided, the email sent alongside
     this notification includes rich appointment details — virtual join
