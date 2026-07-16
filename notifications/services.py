@@ -60,8 +60,7 @@ def notify(recipient_identity, notification_type, title, message="", link=""):
 # creates in-app notifications for the patient (when linked) and the
 # provider, and logs the send so the next poll never repeats it.
 #
-# Email is intentionally not wired up yet — see send_email_reminder()
-# below. When email is ready, fill in that one function only.
+# Email is now wired up via Resend — see send_email_reminder() below.
 # ─────────────────────────────────────────────────────────────────────────
 
 # How far before the appointment each reminder should fire.
@@ -83,13 +82,24 @@ EXCLUDED_STATUSES = ["cancelled", "completed", "no-show"]
 
 def send_email_reminder(appointment, reminder_type):
     """
-    Placeholder for email delivery. Intentionally a no-op for now —
-    in-app notifications are the only channel wired up in this round.
-    Fill this in once an email provider is set up; the calling code
-    already calls this for every reminder sent, so no other changes
-    will be needed.
+    Sends the actual reminder email to patient and provider (when an
+    email address is available for each), via Resend. Reuses
+    _reminder_copy() so wording stays identical to the in-app version.
     """
-    pass
+    from identity.emails import send_appointment_reminder_email
+
+    if appointment.patient_email:
+        title, message = _reminder_copy(appointment, reminder_type, for_provider=False)
+        send_appointment_reminder_email(appointment.patient_email, title, message)
+
+    try:
+        provider_email = appointment.provider.identity.email
+    except Exception:
+        provider_email = None
+
+    if provider_email:
+        title, message = _reminder_copy(appointment, reminder_type, for_provider=True)
+        send_appointment_reminder_email(provider_email, title, message)
 
 
 def _reminder_copy(appointment, reminder_type, for_provider):
@@ -121,10 +131,12 @@ def _reminder_copy(appointment, reminder_type, for_provider):
 def _send_reminder_for_appointment(appointment, reminder_type):
     """
     Creates the in-app notifications (patient + provider) for one
-    appointment/reminder_type pair via notify(), then logs it so it's
-    never repeated. Skips the patient side if there's no linked Identity
-    yet (patient_identity is null until the email-matching backfill
-    links it).
+    appointment/reminder_type pair via notify(), sends the matching
+    email reminder, then logs it so it's never repeated. Skips the
+    patient in-app notification if there's no linked Identity yet
+    (patient_identity is null until the email-matching backfill links
+    it) — email still goes out to patient_email regardless, since that
+    doesn't depend on a linked Identity.
     """
     link = f"/appointments/{appointment.id}"
 
