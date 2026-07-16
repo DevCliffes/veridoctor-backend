@@ -17,7 +17,9 @@ Usage:
 
 Deliberately fails silently (logs, doesn't raise) — a notification that
 fails to write should never break the actual appointment/prescription/
-record-access action it's attached to.
+record-access action it's attached to. The matching email (if the
+recipient has one on file) is sent in a background thread for the same
+reason — it must never block or fail the calling view.
 """
 
 import logging
@@ -34,7 +36,7 @@ def notify(recipient_identity, notification_type, title, message="", link=""):
     if recipient_identity is None:
         return None
     try:
-        return Notification.objects.create(
+        notification = Notification.objects.create(
             recipient_identity=recipient_identity,
             notification_type=notification_type,
             title=title,
@@ -49,6 +51,20 @@ def notify(recipient_identity, notification_type, title, message="", link=""):
         )
         return None
 
+    try:
+        from identity.emails import send_notification_email_async
+        recipient_email = getattr(recipient_identity, "email", None)
+        if recipient_email:
+            send_notification_email_async(recipient_email, title, message)
+    except Exception:
+        logger.exception(
+            "Failed to dispatch notification email (type=%s, recipient=%s)",
+            notification_type,
+            getattr(recipient_identity, "id", None),
+        )
+
+    return notification
+
 
 # ─────────────────────────────────────────────────────────────────────────
 # Appointment reminders
@@ -60,46 +76,43 @@ def notify(recipient_identity, notification_type, title, message="", link=""):
 # creates in-app notifications for the patient (when linked) and the
 # provider, and logs the send so the next poll never repeats it.
 #
-# Email is now wired up via Resend — see send_email_reminder() below.
+# Email is sent automatically as part of notify() above for the patient/
+# provider Identity path. The patient_email fallback below additionally
+# covers appointments where patient_identity hasn't been linked yet
+# (email-matching backfill hasn't run), so the reminder still reaches
+# the patient's inbox even without a linked account.
 # ─────────────────────────────────────────────────────────────────────────
 
-# How far before the appointment each reminder should fire.
 REMINDER_WINDOWS = {
     "24h": timedelta(hours=24),
     "3h": timedelta(hours=3),
     "10m": timedelta(minutes=10),
 }
 
-# How wide a window we accept around the exact target time. Must be at
-# least as large as the poll interval (5 minutes) so no appointment falls
-# through the gap between two consecutive polls. A little extra margin
-# absorbs small delays in the cron firing.
 POLL_TOLERANCE = timedelta(minutes=7)
 
-# Appointments in these statuses should never receive reminders.
 EXCLUDED_STATUSES = ["cancelled", "completed", "no-show"]
 
 
 def send_email_reminder(appointment, reminder_type):
     """
-    Sends the actual reminder email to patient and provider (when an
-    email address is available for each), via Resend. Reuses
-    _reminder_copy() so wording stays identical to the in-app version.
+    Covers the one case notify() can't handle on its own: a patient with
+    no linked Identity yet (patient_identity_id is null), where we still
+    have a raw patient_email on the appointment itself. Provider and
+    linked-patient emails are already sent via notify() above, so this
+    only sends again for patient_email when there's no linked Identity —
+    avoiding a duplicate email to the same address.
     """
-    from identity.emails import send_appointment_reminder_email
+    if appointment.patient_identity_id:
+        return  # already emailed via notify() above
 
-    if appointment.patient_email:
-        title, message = _reminder_copy(appointment, reminder_type, for_provider=False)
-        send_appointment_reminder_email(appointment.patient_email, title, message)
+    if not appointment.patient_email:
+        return
 
-    try:
-        provider_email = appointment.provider.identity.email
-    except Exception:
-        provider_email = None
+    from identity.emails import send_notification_email_async
 
-    if provider_email:
-        title, message = _reminder_copy(appointment, reminder_type, for_provider=True)
-        send_appointment_reminder_email(provider_email, title, message)
+    title, message = _reminder_copy(appointment, reminder_type, for_provider=False)
+    send_notification_email_async(appointment.patient_email, title, message)
 
 
 def _reminder_copy(appointment, reminder_type, for_provider):
@@ -131,12 +144,10 @@ def _reminder_copy(appointment, reminder_type, for_provider):
 def _send_reminder_for_appointment(appointment, reminder_type):
     """
     Creates the in-app notifications (patient + provider) for one
-    appointment/reminder_type pair via notify(), sends the matching
-    email reminder, then logs it so it's never repeated. Skips the
-    patient in-app notification if there's no linked Identity yet
-    (patient_identity is null until the email-matching backfill links
-    it) — email still goes out to patient_email regardless, since that
-    doesn't depend on a linked Identity.
+    appointment/reminder_type pair via notify() — which also emails
+    them automatically when they have a linked Identity with an email —
+    then covers the unlinked-patient email fallback, then logs the send
+    so it's never repeated.
     """
     link = f"/appointments/{appointment.id}"
 
