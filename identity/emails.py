@@ -67,28 +67,32 @@ def send_otp_email(to_email: str, otp_code: str) -> bool:
 def send_appointment_reminder_email(to_email: str, subject: str, message: str) -> bool:
     """
     Sends an appointment reminder email via Resend. Kept as a named
-    wrapper (rather than just calling send_notification_email directly)
-    so reminder call sites stay self-documenting.
+    wrapper so reminder call sites stay self-documenting.
     """
     return send_notification_email(to_email, subject, message)
 
 
-def send_notification_email(to_email: str, subject: str, message: str) -> bool:
+def send_notification_email(to_email: str, subject: str, message: str, html_body: str = None) -> bool:
     """
     Generic notification email — used for every notification-worthy
     event: bookings, confirmations, cancellations, reschedules,
     prescriptions, reminders, etc.
+
+    If html_body is provided (e.g. a richer appointment-details email
+    built by notifications/services.py), it's used as-is instead of the
+    plain default template wrapped around `message`.
     """
-    html_body = f"""
-        <div style="font-family: sans-serif; max-width: 480px; margin: 0 auto;">
-            <h2 style="color: #2563EB;">VeriDoctor</h2>
-            <p>{message}</p>
-        </div>
-    """
+    if html_body is None:
+        html_body = f"""
+            <div style="font-family: sans-serif; max-width: 480px; margin: 0 auto;">
+                <h2 style="color: #2563EB;">VeriDoctor</h2>
+                <p>{message}</p>
+            </div>
+        """
     return _send_via_resend(to_email, subject, html_body)
 
 
-def send_notification_email_async(to_email: str, subject: str, message: str) -> None:
+def send_notification_email_async(to_email: str, subject: str, message: str, html_body: str = None) -> None:
     """
     Fire-and-forget version for use inside notify()/`_notify()` helpers,
     so creating a notification never blocks on an outbound HTTP call.
@@ -96,5 +100,5 @@ def send_notification_email_async(to_email: str, subject: str, message: str) -> 
     if not to_email:
         return
     threading.Thread(
-        target=send_notification_email, args=(to_email, subject, message)
+        target=send_notification_email, args=(to_email, subject, message, html_body)
     ).start()
