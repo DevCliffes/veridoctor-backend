@@ -48,15 +48,27 @@ def _get_overlapping_appointment(provider, start_time, end_time, exclude_id=None
     return qs.first()
 
 
-def _notify(recipient_identity, notification_type, title, message="", link=""):
+ddef _notify(recipient_identity, notification_type, title, message="", link="", appointment=None, for_provider=False):
+    """
+    appointment / for_provider: when provided, the email sent alongside
+    this notification includes rich appointment details — virtual join
+    instructions or in-person address — via
+    notifications.services.build_appointment_email_html(). When omitted
+    (e.g. prescription-ready notifications with no appointment context),
+    falls back to a plain message-only email, same as before.
+    """
     try:
-        from notifications.services import notify
+        from notifications.services import notify, build_appointment_email_html
+        email_html = None
+        if appointment is not None:
+            email_html = build_appointment_email_html(appointment, for_provider, message)
         notify(
             recipient_identity=recipient_identity,
             notification_type=notification_type,
             title=title,
             message=message,
             link=link,
+            email_html=email_html,
         )
     except Exception:
         pass
