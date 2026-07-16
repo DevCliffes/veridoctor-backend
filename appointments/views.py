@@ -359,6 +359,8 @@ class PatientAppointmentView(APIView):
                 message=f"{patient_name} booked an appointment on "
                         f"{appointment.start_time.strftime('%d %b %Y at %H:%M')}.",
                 link=f"/appointments/{appointment.id}",
+                appointment=appointment,
+                for_provider=True,
             )
 
         if patient_identity:
@@ -373,6 +375,8 @@ class PatientAppointmentView(APIView):
                 message=f"Your appointment with {provider_name} on "
                         f"{appointment.start_time.strftime('%d %b %Y at %H:%M')} is booked.",
                 link="/appointments",
+                appointment=appointment,
+                for_provider=False,
             )
 
         return Response(
@@ -417,6 +421,8 @@ class PatientAppointmentView(APIView):
                         title="Appointment confirmed",
                         message=f"Your appointment with {provider_name} has been confirmed.",
                         link="/appointments",
+                        appointment=updated,
+                        for_provider=False,
                     )
                 elif new_status == "cancelled":
                     _notify(
@@ -425,6 +431,8 @@ class PatientAppointmentView(APIView):
                         title="Appointment cancelled",
                         message=f"Your appointment with {provider_name} has been cancelled.",
                         link="/appointments",
+                        appointment=updated,
+                        for_provider=False,
                     )
                 elif new_status == "rescheduled":
                     _notify(
@@ -433,6 +441,8 @@ class PatientAppointmentView(APIView):
                         title="Appointment rescheduled",
                         message=f"Your appointment with {provider_name} has been rescheduled.",
                         link="/appointments",
+                        appointment=updated,
+                        for_provider=False,
                     )
 
             if provider_identity:
@@ -444,6 +454,8 @@ class PatientAppointmentView(APIView):
                         message=f"{patient_name} cancelled their appointment on "
                                 f"{updated.start_time.strftime('%d %b %Y at %H:%M')}.",
                         link=f"/appointments/{updated.id}",
+                        appointment=updated,
+                        for_provider=True,
                     )
                 elif new_status == "rescheduled":
                     _notify(
@@ -453,6 +465,8 @@ class PatientAppointmentView(APIView):
                         message=f"{patient_name} rescheduled their appointment to "
                                 f"{updated.start_time.strftime('%d %b %Y at %H:%M')}.",
                         link=f"/appointments/{updated.id}",
+                        appointment=updated,
+                        for_provider=True,
                     )
 
         return Response(ProviderAppointmentSerializer(updated).data)
@@ -550,6 +564,8 @@ class ProviderAppointmentView(APIView):
                 message=f"{provider_name} has scheduled an appointment for you on "
                         f"{appointment.start_time.strftime('%d %b %Y at %H:%M')}.",
                 link="/appointments",
+                appointment=appointment,
+                for_provider=False,
             )
 
         if provider and provider.identity:
@@ -561,6 +577,8 @@ class ProviderAppointmentView(APIView):
                 message=f"You scheduled an appointment for {patient_name} on "
                         f"{appointment.start_time.strftime('%d %b %Y at %H:%M')}.",
                 link=f"/appointments/{appointment.id}",
+                appointment=appointment,
+                for_provider=True,
             )
 
         return Response(
@@ -617,6 +635,8 @@ class ProviderAppointmentDetailView(APIView):
                         title="Appointment confirmed",
                         message=f"Your appointment with {provider_name} has been confirmed.",
                         link="/appointments",
+                        appointment=updated,
+                        for_provider=False,
                     )
                 elif new_status == "cancelled":
                     _notify(
@@ -625,6 +645,8 @@ class ProviderAppointmentDetailView(APIView):
                         title="Appointment cancelled",
                         message=f"Your appointment with {provider_name} has been cancelled.",
                         link="/appointments",
+                        appointment=updated,
+                        for_provider=False,
                     )
                 elif new_status == "rescheduled":
                     _notify(
@@ -633,6 +655,8 @@ class ProviderAppointmentDetailView(APIView):
                         title="Appointment rescheduled",
                         message=f"Your appointment with {provider_name} has been rescheduled.",
                         link="/appointments",
+                        appointment=updated,
+                        for_provider=False,
                     )
                 elif new_status == "in-progress":
                     _notify(
@@ -641,6 +665,8 @@ class ProviderAppointmentDetailView(APIView):
                         title="Your consultation has started",
                         message=f"Your consultation with {provider_name} is now in progress.",
                         link="/appointments",
+                        appointment=updated,
+                        for_provider=False,
                     )
 
             if provider_identity:
@@ -652,6 +678,8 @@ class ProviderAppointmentDetailView(APIView):
                         message=f"The appointment with {patient_name} on "
                                 f"{updated.start_time.strftime('%d %b %Y at %H:%M')} was cancelled.",
                         link=f"/appointments/{updated.id}",
+                        appointment=updated,
+                        for_provider=True,
                     )
                 elif new_status == "rescheduled":
                     _notify(
@@ -661,6 +689,8 @@ class ProviderAppointmentDetailView(APIView):
                         message=f"The appointment with {patient_name} has been rescheduled to "
                                 f"{updated.start_time.strftime('%d %b %Y at %H:%M')}.",
                         link=f"/appointments/{updated.id}",
+                        appointment=updated,
+                        for_provider=True,
                     )
 
         return Response(ProviderAppointmentSerializer(updated).data)
