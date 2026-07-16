@@ -216,3 +216,55 @@ def send_due_reminders():
             sent_counts[reminder_type] += 1
 
     return sent_counts
+
+def build_appointment_email_html(appointment, for_provider, message):
+    local_time = timezone.localtime(appointment.start_time).strftime("%a, %d %b · %H:%M")
+    appt_type = appointment.appointment_type
+
+    details_html = f"<p><strong>Date &amp; time:</strong> {local_time}</p>"
+
+    if appt_type == "virtual":
+        details_html += """
+            <p><strong>This is a virtual appointment.</strong></p>
+            <ul style="padding-left: 20px; color: #374151;">
+                <li>Join at least 5 minutes early.</li>
+                <li>Find a quiet, private space with good lighting.</li>
+                <li>Check your camera, microphone, and internet connection beforehand.</li>
+            </ul>
+        """
+        meet_id = getattr(appointment, "meet_id", None)
+        if meet_id:
+            details_html += (
+                f'<p><a href="https://veridoctor.com/consult/{meet_id}" '
+                f'style="color:#2563EB;">Join video consultation</a></p>'
+            )
+    else:
+        provider = getattr(appointment, "provider", None)
+        clinic_name = ""
+        address = ""
+        county = ""
+        country = ""
+        if provider is not None:
+            clinic_name = provider.clinic_name or ""
+            address = provider.address or ""
+            county = provider.county or ""
+            country = provider.country or ""
+
+        location_line = ", ".join(part for part in [address, county, country] if part)
+
+        details_html += "<p><strong>This is an in-person appointment.</strong></p>"
+        if clinic_name:
+            details_html += f"<p><strong>Location:</strong> {clinic_name}</p>"
+        if location_line:
+            details_html += f"<p>{location_line}</p>"
+        if not clinic_name and not location_line:
+            details_html += "<p>Please contact the clinic for the exact location.</p>"
+        details_html += "<p>Please arrive a few minutes early to complete check-in.</p>"
+
+    return f"""
+        <div style="font-family: sans-serif; max-width: 480px; margin: 0 auto;">
+            <h2 style="color: #2563EB;">VeriDoctor</h2>
+            <p>{message}</p>
+            {details_html}
+        </div>
+    """
