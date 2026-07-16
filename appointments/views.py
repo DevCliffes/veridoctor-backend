@@ -50,8 +50,8 @@ def _get_overlapping_appointment(provider, start_time, end_time, exclude_id=None
 
 def _notify(recipient_identity, notification_type, title, message="", link=""):
     try:
-        from notifications.models import Notification
-        Notification.objects.create(
+        from notifications.services import notify
+        notify(
             recipient_identity=recipient_identity,
             notification_type=notification_type,
             title=title,
