@@ -32,7 +32,13 @@ from .models import Notification, AppointmentReminderLog
 logger = logging.getLogger(__name__)
 
 
-def notify(recipient_identity, notification_type, title, message="", link=""):
+def notify(recipient_identity, notification_type, title, message="", link="", email_html=None):
+    """
+    email_html: optional pre-built HTML string (e.g. an appointment
+    details email with virtual join instructions or in-person address,
+    built via build_appointment_email_html()). When omitted, the
+    recipient still gets a plain email built from `message`.
+    """
     if recipient_identity is None:
         return None
     try:
@@ -55,7 +61,7 @@ def notify(recipient_identity, notification_type, title, message="", link=""):
         from identity.emails import send_notification_email_async
         recipient_email = getattr(recipient_identity, "email", None)
         if recipient_email:
-            send_notification_email_async(recipient_email, title, message)
+            send_notification_email_async(recipient_email, title, message, html_body=email_html)
     except Exception:
         logger.exception(
             "Failed to dispatch notification email (type=%s, recipient=%s)",
