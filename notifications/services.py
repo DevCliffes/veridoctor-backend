@@ -238,12 +238,6 @@ def build_appointment_email_html(appointment, for_provider, message):
                 <li>Check your camera, microphone, and internet connection beforehand.</li>
             </ul>
         """
-        meet_id = getattr(appointment, "meet_id", None)
-        if meet_id:
-            details_html += (
-                f'<p><a href="https://veridoctor.com/consult/{meet_id}" '
-                f'style="color:#2563EB;">Join video consultation</a></p>'
-            )
     else:
         provider = getattr(appointment, "provider", None)
         clinic_name = ""
@@ -265,12 +259,13 @@ def build_appointment_email_html(appointment, for_provider, message):
             details_html += f"<p>{location_line}</p>"
         if not clinic_name and not location_line:
             details_html += "<p>Please contact the clinic for the exact location.</p>"
-        details_html += "<p>Please arrive a few minutes early to complete check-in.</p>"
+        details_html += "<p>Please arrive at least 10 minutes early to complete check-in.</p>"
 
     return f"""
         <div style="font-family: sans-serif; max-width: 480px; margin: 0 auto;">
             <h2 style="color: #2563EB;">VeriDoctor</h2>
             <p>{message}</p>
             {details_html}
+            <p style="margin-top: 24px;">Best Regards,<br/>VeriDoctor Team.</p>
         </div>
     """
