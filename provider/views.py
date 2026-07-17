@@ -289,6 +289,52 @@ def _reset_document_review(provider, field_name, url):
     )
 
 
+def _compute_onboarding_status(provider):
+    """
+    Derives a single onboarding gate status for the frontend from two
+    independent signals:
+      - provider.profile_complete: a real column, kept in sync by
+        HealthcareProvider.save() (see recompute_profile_complete).
+      - ProviderDocumentReview rows: one per document field, each with its
+        own pending/approved/rejected status.
+
+    Returned as an enum rather than exposing the raw pieces so the
+    frontend gate has one thing to switch on. Deliberately NOT based on
+    "is this the provider's first login" -- this can re-trigger later if
+    a document is rejected on a re-review, or if the provider closes the
+    tab mid-onboarding and returns days later.
+
+    Precedence: incomplete_profile > documents_rejected > pending_review
+    > approved. A provider who hasn't finished the base profile sees that
+    first, even if some documents happen to already be approved; a
+    rejection outranks "still pending" so it's never masked by other
+    fields still sitting in pending.
+    """
+    if not provider.profile_complete:
+        return "incomplete_profile"
+
+    reviews_by_field = {
+        r.field_name: r.status
+        for r in ProviderDocumentReview.objects.filter(provider=provider)
+    }
+
+    has_rejected_documents = any(
+        reviews_by_field.get(field) == ProviderDocumentReview.STATUS_REJECTED
+        for field in ALLOWED_DOCUMENT_FIELDS
+    )
+    if has_rejected_documents:
+        return "documents_rejected"
+
+    documents_all_approved = all(
+        reviews_by_field.get(field) == ProviderDocumentReview.STATUS_APPROVED
+        for field in ALLOWED_DOCUMENT_FIELDS
+    )
+    if not documents_all_approved:
+        return "pending_review"
+
+    return "approved"
+
+
 class ProviderProfileView(APIView):
     def get(self, request, identity_id):
         try:
@@ -329,6 +375,9 @@ class ProviderProfileView(APIView):
             "valid_licence_number": getattr(provider, "valid_licence_number", "") or "",
             "valid_licence_image": getattr(provider, "valid_licence_image", "") or "",
             "extra_credentials": getattr(provider, "extra_credentials", []) or [],
+            # ── Onboarding gate fields ─────────────────────────────────
+            "profile_complete": provider.profile_complete,
+            "onboarding_status": _compute_onboarding_status(provider),
         })
 
     def patch(self, request, identity_id):
