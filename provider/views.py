@@ -844,8 +844,13 @@ class ProviderListView(APIView):
 
         data = []
         for p in providers:
-            if not p.profile_complete:
-                continue  # not bookable until profile is complete
+            # Not bookable until profile is complete AND fully approved.
+            # profile_complete alone isn't enough -- a provider can have a
+            # complete profile but still be pending_review or
+            # documents_rejected, and neither of those should ever be
+            # patient-visible or bookable.
+            if _compute_onboarding_status(p) != "approved":
+                continue
             services = list(p.services.filter(price_visible=True).values(
                 "id", "name", "price", "currency", "estimated_duration"
             ))
@@ -877,6 +882,14 @@ class ProviderPublicProfileView(APIView):
             provider = HealthcareProvider.objects.select_related("identity").get(identity=identity)
         except (Identity.DoesNotExist, HealthcareProvider.DoesNotExist):
             return Response({"error": "Provider not found"}, status=status.HTTP_404_NOT_FOUND)
+
+        # Same gate as ProviderListView -- an unapproved provider's public
+        # profile shouldn't be viewable even if a patient has a direct
+        # link (e.g. a stale bookmark, or a link shared before the
+        # provider was de-approved on re-review).
+        if _compute_onboarding_status(provider) != "approved":
+            return Response({"error": "Provider not found"}, status=status.HTTP_404_NOT_FOUND)
+
         services = list(
             provider.services.filter(price_visible=True).values(
                 "id", "name", "price", "currency", "estimated_duration", "description"
@@ -916,6 +929,18 @@ class ProviderAvailableSlotsView(APIView):
             provider = HealthcareProvider.objects.get(identity=identity)
         except (Identity.DoesNotExist, HealthcareProvider.DoesNotExist):
             return Response({"error": "Provider not found"}, status=404)
+
+        # Independent gate, even though ProviderListView already excludes
+        # unapproved providers from search results. A patient could still
+        # hit this endpoint directly with a stale/leaked provider ID, or a
+        # provider could be de-approved (e.g. a document rejected on
+        # re-review) after a patient already has the profile page open
+        # with the ID in hand. Returning an empty list (rather than a
+        # 404/403) keeps this endpoint's contract identical to "no slots
+        # today" from the frontend's point of view -- no special-casing
+        # needed in ProviderCard/SlotColumn.
+        if _compute_onboarding_status(provider) != "approved":
+            return Response([])
 
         python_dow = query_date.weekday()
         dow_abbr = ["Mon", "Tue", "Wed", "Thu", "Fri", "Sat", "Sun"][python_dow]
