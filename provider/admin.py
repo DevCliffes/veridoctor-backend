@@ -41,6 +41,13 @@ def _notify_provider_of_review(review):
     Wrapped in try/except to match the existing _notify() pattern in
     appointments/views.py -- a notification failure should never block
     the actual approve/reject action from saving.
+
+    `link` points at /profile#<field_name> (e.g.
+    /profile#operating_licence_image) rather than a generic path -- the
+    field_name matches the `id` attribute on that document's upload
+    control in the profile page, so clicking the notification scrolls
+    the doctor straight to the flagged document instead of dropping them
+    at the top of a long form to hunt for it themselves.
     """
     try:
         from notifications.models import Notification
@@ -61,10 +68,10 @@ def _notify_provider_of_review(review):
 
         Notification.objects.create(
             recipient_identity=identity,
-            notification_type="document_review",
+            notification_type="document_reviewed",
             title=title,
             message=message,
-            link="/provider/documents",
+            link=f"/profile#{review.field_name}",
         )
     except Exception:
         pass
