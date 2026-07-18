@@ -1,7 +1,5 @@
 from django.db import models
 from shared.models import BaseModel
-
-
 class Notification(BaseModel):
     """
     A single in-app notification for a recipient (provider or patient).
@@ -16,6 +14,7 @@ class Notification(BaseModel):
         ("prescription_ready", "Prescription ready"),
         ("record_access_requested", "Record access requested"),
         ("record_access_granted", "Record access granted"),
+        ("document_reviewed", "Document reviewed"),
     ]
     recipient_identity = models.ForeignKey(
         "identity.Identity",
@@ -34,17 +33,13 @@ class Notification(BaseModel):
         help_text="Optional relative frontend path to navigate to when clicked, e.g. '/appointments/<id>'.",
     )
     is_read = models.BooleanField(default=False)
-
     class Meta:
         ordering = ["-created_at"]
         indexes = [
             models.Index(fields=["recipient_identity", "is_read"]),
         ]
-
     def __str__(self):
         return f"[{self.notification_type}] {self.title} -> {self.recipient_identity_id}"
-
-
 class AppointmentReminderLog(BaseModel):
     """
     Tracks which reminder windows have already been sent for a given
@@ -65,7 +60,6 @@ class AppointmentReminderLog(BaseModel):
     )
     reminder_type = models.CharField(max_length=10, choices=REMINDER_TYPE_CHOICES)
     sent_at = models.DateTimeField(auto_now_add=True)
-
     class Meta:
         ordering = ["-sent_at"]
         constraints = [
@@ -74,11 +68,8 @@ class AppointmentReminderLog(BaseModel):
                 name="unique_reminder_per_appointment_and_type",
             )
         ]
-
     def __str__(self):
         return f"{self.reminder_type} reminder for appointment {self.appointment_id}"
-
-
 class PushSubscription(BaseModel):
     """
     A single browser/device subscription for Web Push. One identity can
@@ -93,7 +84,6 @@ class PushSubscription(BaseModel):
     p256dh = models.CharField(max_length=255)
     auth = models.CharField(max_length=255)
     user_agent = models.CharField(max_length=255, blank=True)
-
     class Meta:
         constraints = [
             models.UniqueConstraint(
@@ -101,6 +91,5 @@ class PushSubscription(BaseModel):
                 name="unique_push_subscription_per_identity_endpoint",
             )
         ]
-
     def __str__(self):
         return f"Push subscription for {self.identity_id}"
