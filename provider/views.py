@@ -43,6 +43,37 @@ ALLOWED_DOCUMENT_FIELDS = [
     "valid_licence_image",
 ]
 
+# Human-readable labels for every field that can show up in
+# HealthcareProvider.missing_fields(), used to turn the raw field-name
+# list into something a doctor can actually act on when a "submit for
+# review" attempt is rejected for being incomplete.
+MISSING_FIELD_LABELS = {
+    "phone_number": "Phone number",
+    "licence_number": "Licence number",
+    "licence_type": "Licence type",
+    "speciality": "Speciality",
+    "clinic_name": "Clinic name",
+    "address": "Address",
+    "county": "County",
+    "country": "Country",
+    "bio": "Bio / About",
+    "national_id_number": "National ID / Passport number",
+    "business_reg_number": "Business registration number",
+    "operating_licence": "Operating licence number",
+    "kra_pin": "KRA PIN",
+    "valid_licence_number": "Valid operating licence number",
+    "profile_picture_url": "Profile photo",
+    "national_id_image": "National ID / Passport image",
+    "clinic_logo_url": "Clinic logo",
+    "business_reg_image": "Business registration certificate",
+    "operating_licence_image": "Operating licence image",
+    "kra_pin_image": "KRA PIN certificate",
+    "cr12_image": "CR12",
+    "valid_licence_image": "Valid operating licence image",
+    "first_name": "First name",
+    "last_name": "Last name",
+}
+
 
 # ─────────────────────────────────────────────────────────────────────────
 # SCHEDULE OVERLAP DETECTION
@@ -409,6 +440,35 @@ class ProviderProfileView(APIView):
             if field in request.data:
                 setattr(provider, field, request.data[field])
         provider.save()
+
+        # ── Submit-for-review validation ────────────────────────────────
+        # The frontend's "Submit for Review" button is disabled client-side
+        # until the profile looks complete, but that's only a UX nicety --
+        # it can be bypassed (devtools, a raw API call, a stale cached
+        # page). This is the real gate. Whatever was sent above is always
+        # saved regardless of completeness, so nobody ever loses in-
+        # progress work just because they weren't finished yet -- but if
+        # the request explicitly signals `submit: true` and the profile is
+        # still missing required fields or documents, we reject with a 400
+        # listing exactly what's missing, rather than silently letting an
+        # incomplete profile through to review.
+        if request.data.get("submit"):
+            missing = provider.missing_fields()
+            if missing:
+                return Response(
+                    {
+                        "error": (
+                            "Your profile is missing some required information. "
+                            "Please complete every field before submitting for review."
+                        ),
+                        "missing_fields": missing,
+                        "missing_field_labels": [
+                            MISSING_FIELD_LABELS.get(f, f) for f in missing
+                        ],
+                    },
+                    status=status.HTTP_400_BAD_REQUEST,
+                )
+            return Response({"success": True, "submitted": True})
 
         return Response({"success": True})
 
