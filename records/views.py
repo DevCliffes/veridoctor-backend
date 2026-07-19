@@ -528,6 +528,7 @@ class PatientSensitivityView(APIView):
             "sensitivity": summary.sensitivity,
         })
 
+
 class ProviderGrantedRecordsView(APIView):
     """
     Lets a requesting provider view the ACTUAL record contents for a
@@ -541,15 +542,19 @@ class ProviderGrantedRecordsView(APIView):
 
     GET /records/provider/<provider_id>/appointment/<appointment_id>/granted-records/<category>
 
-    Gated by ProviderPatientRelationshipRequired (same permission class
-    used by ProviderPatientTimelineView) — confirms provider_id has a real
-    appointment relationship with the patient linked to appointment_id.
-    On top of that, this view additionally requires a matching APPROVED
-    RecordAccessGrant for this exact appointment + provider + category,
-    since the relationship check alone isn't consent to view a DIFFERENT
-    provider's records.
+    No permission_classes here deliberately: ProviderPatientRelationshipRequired
+    expects a `patient_identity_id` URL kwarg (it was written for
+    ProviderPatientTimelineView's URL shape), which this route doesn't have —
+    it identifies the patient via the appointment instead. Using that
+    permission class here would make view.kwargs.get("patient_identity_id")
+    return None, failing has_permission() unconditionally for every request.
+    Instead, get() below does its own — stricter — check: it confirms the
+    requesting provider matches appointment.provider, that an APPROVED
+    RecordAccessGrant exists for this exact appointment/category, and that
+    it hasn't expired. That's already more precise than a general
+    "some non-cancelled appointment exists with this patient" check would
+    have been, so no separate permission class is needed.
     """
-    permission_classes = [ProviderPatientRelationshipRequired]
 
     def get(self, request, provider_id, appointment_id, category):
         from appointments.models import ProviderAppointment
@@ -574,10 +579,10 @@ class ProviderGrantedRecordsView(APIView):
         except HealthcareProvider.DoesNotExist:
             return Response({"error": "Provider not found"}, status=status.HTTP_404_NOT_FOUND)
 
-        # The relationship permission class confirms provider_id has SOME
-        # appointment with this patient — it does not confirm this is the
-        # SAME appointment/consultation the grant was scoped to. Enforce
-        # that explicitly here.
+        # Confirms this provider is actually the requester on THIS
+        # appointment — the equivalent of the relationship check
+        # ProviderPatientRelationshipRequired would have done, but scoped
+        # correctly to the specific consultation the grant belongs to.
         if appointment.provider_id != requesting_provider.id:
             return Response(
                 {"error": "This provider is not the requester on this appointment"},
