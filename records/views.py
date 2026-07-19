@@ -598,6 +598,21 @@ class ProviderGrantedRecordsView(APIView):
                 status=status.HTTP_403_FORBIDDEN,
             )
 
+        # Access is scoped to the consultation it was granted for — the
+        # RecordAccessGrant model's own docstring says this is enforced
+        # at the API layer, but no existing view actually did it. Same
+        # 30-minute grace window already used elsewhere in this codebase
+        # (CALL_WINDOW_MS on the frontend, POLL_TOLERANCE for reminders)
+        # so a provider isn't cut off mid-review right as the appointment
+        # ends, but access doesn't stay open indefinitely either.
+        from datetime import timedelta
+        GRACE_PERIOD = timedelta(minutes=30)
+        if timezone.now() > appointment.end_time + GRACE_PERIOD:
+            return Response(
+                {"error": "Access to this consultation's granted records has expired"},
+                status=status.HTTP_403_FORBIDDEN,
+            )
+
         # Resolve which OTHER providers fall under this category label —
         # categories are grouped by speciality/clinic_name string in
         # ProviderPatientSummaryView, so mirror that exact logic here to
