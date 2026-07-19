@@ -527,3 +527,156 @@ class PatientSensitivityView(APIView):
             "id": str(summary.id),
             "sensitivity": summary.sensitivity,
         })
+
+class ProviderGrantedRecordsView(APIView):
+    """
+    Lets a requesting provider view the ACTUAL record contents for a
+    patient category they've been granted access to via RecordAccessGrant.
+
+    This is the missing piece: ProviderPatientSummaryView only ever
+    returns grant metadata (status/count), and ProviderPatientTimelineView
+    only returns records THIS provider created. Neither can show another
+    provider's records even after the patient approves — this view closes
+    that gap.
+
+    GET /records/provider/<provider_id>/appointment/<appointment_id>/granted-records/<category>
+
+    Gated by ProviderPatientRelationshipRequired (same permission class
+    used by ProviderPatientTimelineView) — confirms provider_id has a real
+    appointment relationship with the patient linked to appointment_id.
+    On top of that, this view additionally requires a matching APPROVED
+    RecordAccessGrant for this exact appointment + provider + category,
+    since the relationship check alone isn't consent to view a DIFFERENT
+    provider's records.
+    """
+    permission_classes = [ProviderPatientRelationshipRequired]
+
+    def get(self, request, provider_id, appointment_id, category):
+        from appointments.models import ProviderAppointment
+        from provider.models import Prescription
+
+        try:
+            appointment = ProviderAppointment.objects.select_related(
+                "patient_identity", "provider"
+            ).get(id=appointment_id)
+        except ProviderAppointment.DoesNotExist:
+            return Response({"error": "Appointment not found"}, status=status.HTTP_404_NOT_FOUND)
+
+        patient_identity = appointment.patient_identity
+        if not patient_identity:
+            return Response(
+                {"error": "No patient identity linked to this appointment"},
+                status=status.HTTP_404_NOT_FOUND,
+            )
+
+        try:
+            requesting_provider = HealthcareProvider.objects.get(identity__id=provider_id)
+        except HealthcareProvider.DoesNotExist:
+            return Response({"error": "Provider not found"}, status=status.HTTP_404_NOT_FOUND)
+
+        # The relationship permission class confirms provider_id has SOME
+        # appointment with this patient — it does not confirm this is the
+        # SAME appointment/consultation the grant was scoped to. Enforce
+        # that explicitly here.
+        if appointment.provider_id != requesting_provider.id:
+            return Response(
+                {"error": "This provider is not the requester on this appointment"},
+                status=status.HTTP_403_FORBIDDEN,
+            )
+
+        grant = RecordAccessGrant.objects.filter(
+            appointment=appointment,
+            patient_identity=patient_identity,
+            requesting_provider=requesting_provider,
+            requested_category=category,
+            status="approved",
+        ).first()
+
+        if not grant:
+            return Response(
+                {"error": "No approved access grant for this category on this appointment"},
+                status=status.HTTP_403_FORBIDDEN,
+            )
+
+        # Resolve which OTHER providers fall under this category label —
+        # categories are grouped by speciality/clinic_name string in
+        # ProviderPatientSummaryView, so mirror that exact logic here to
+        # stay consistent with what the patient was shown before approving.
+        other_summaries = PatientProviderRecordSummary.objects.filter(
+            patient_identity=patient_identity,
+        ).exclude(provider=requesting_provider).select_related("provider", "provider__identity")
+
+        matching_provider_ids = [
+            s.provider_id for s in other_summaries
+            if (s.provider.speciality or s.provider.clinic_name or "General Practice") == category
+        ]
+
+        if not matching_provider_ids:
+            return Response({"category": category, "total": 0, "records": []})
+
+        records = []
+
+        appointments = ProviderAppointment.objects.filter(
+            patient_identity=patient_identity,
+            provider_id__in=matching_provider_ids,
+        ).exclude(status="cancelled").select_related(
+            "provider", "provider__identity", "service"
+        ).prefetch_related("captures").order_by("-start_time")
+
+        for appt in appointments:
+            captures = []
+            for cap in appt.captures.all():
+                captures.append({
+                    "form_name": cap.form_name,
+                    "form_snapshot": cap.form_snapshot,
+                    "values": cap.values,
+                    "captured_at": cap.created_at.isoformat(),
+                })
+            records.append({
+                "id": str(appt.id),
+                "record_type": "consultation",
+                "date": appt.start_time.isoformat(),
+                "provider_name": f"Dr. {appt.provider.identity.first_name} {appt.provider.identity.last_name}",
+                "speciality": appt.provider.speciality or "",
+                "facility_name": appt.provider.clinic_name or "",
+                "appointment_type": appt.appointment_type,
+                "status": appt.status,
+                "service_name": appt.service.name if appt.service else None,
+                "captures": captures,
+                "has_clinical_notes": len(captures) > 0,
+            })
+
+        prescriptions = Prescription.objects.filter(
+            patient_identity=patient_identity,
+            provider_id__in=matching_provider_ids,
+        ).select_related("provider", "provider__identity").prefetch_related("drugs").order_by("-created_at")
+
+        for rx in prescriptions:
+            drugs = []
+            for drug in rx.drugs.all():
+                drugs.append({
+                    "drug_name": drug.drug_name,
+                    "dosage": drug.dosage,
+                    "frequency": drug.frequency,
+                    "duration": drug.duration,
+                    "instructions": drug.instructions,
+                })
+            records.append({
+                "id": str(rx.id),
+                "record_type": "prescription",
+                "date": rx.created_at.isoformat(),
+                "provider_name": f"Dr. {rx.provider.identity.first_name} {rx.provider.identity.last_name}",
+                "speciality": rx.provider.speciality or "",
+                "facility_name": rx.provider.clinic_name or "",
+                "diagnosis": rx.diagnosis,
+                "notes": rx.notes,
+                "drugs": drugs,
+            })
+
+        records.sort(key=lambda r: r["date"], reverse=True)
+
+        return Response({
+            "category": category,
+            "total": len(records),
+            "records": records,
+        })
