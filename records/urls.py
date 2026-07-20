@@ -18,6 +18,7 @@ from .pin_views import (
     RecordsPinChangeView,
     RecordsPinResetView,
 )
+
 urlpatterns = [
     # Patient-facing
     path("patient/<uuid:patient_identity_id>/summary", PatientRecordSummaryView.as_view()),
