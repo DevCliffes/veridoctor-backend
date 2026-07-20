@@ -39,4 +39,5 @@ urlpatterns = [
     path("pin/verify", RecordsPinVerifyView.as_view()),
     path("pin/change", RecordsPinChangeView.as_view()),
     path("pin/reset", RecordsPinResetView.as_view()),
+    path("patient/<uuid:patient_identity_id>/vitals", PatientVitalsView.as_view()),
 ]
