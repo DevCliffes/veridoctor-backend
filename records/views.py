@@ -3,6 +3,8 @@ from rest_framework.views import APIView
 from rest_framework.response import Response
 from rest_framework import status
 from rest_framework.permissions import IsAuthenticated
+from rest_framework.pagination import PageNumberPagination
+from django.db.models import Q
 from identity.models import Identity
 from provider.models import HealthcareProvider
 from .models import PatientProviderRecordSummary, RecordAccessGrant
@@ -432,7 +434,37 @@ class RecordAccessRequestView(APIView):
         )
 
 
+class AccessRequestPagination(PageNumberPagination):
+    page_size = 20
+    page_size_query_param = "page_size"
+    max_page_size = 100
+
+
 class PatientAccessRequestsView(APIView):
+    """
+    Paginated, filterable list of access requests (RecordAccessGrant) for
+    a given patient.
+
+    GET /records/patient/<patient_identity_id>/access-requests
+        ?status=pending&page=1&page_size=20&search=doctor18
+
+    FIX: this view used to return every RecordAccessGrant for the patient
+    in one unpaginated list -- fine at a handful of requests, but at scale
+    (hundreds/thousands of historical grants across many providers) that's
+    an ever-growing payload with no way to filter down to just what needs
+    action. Added:
+      - status filtering ("pending" | "approved" | "denied"; omitted/
+        "all" returns everything, same as before)
+      - free-text search against the requesting provider's name/speciality
+      - pagination via DRF's PageNumberPagination, applied manually here
+        (rather than switching to ListAPIView) so the response shape and
+        existing serialization-by-hand below don't change for any
+        frontend code already consuming this endpoint's plain list --
+        only now it's wrapped in {count, next, previous, results}.
+    """
+
+    pagination_class = AccessRequestPagination
+
     def get(self, request, patient_identity_id):
         try:
             patient_identity = Identity.objects.get(id=patient_identity_id)
@@ -445,7 +477,24 @@ class PatientAccessRequestsView(APIView):
             "requesting_provider",
             "requesting_provider__identity",
             "appointment",
-        ).order_by("-created_at")
+        )
+
+        status_param = request.query_params.get("status", "all")
+        if status_param in ("pending", "approved", "denied"):
+            grants = grants.filter(status=status_param)
+
+        search = request.query_params.get("search")
+        if search:
+            grants = grants.filter(
+                Q(requesting_provider__identity__first_name__icontains=search)
+                | Q(requesting_provider__identity__last_name__icontains=search)
+                | Q(requesting_provider__speciality__icontains=search)
+            )
+
+        grants = grants.order_by("-created_at")
+
+        paginator = self.pagination_class()
+        page = paginator.paginate_queryset(grants, request, view=self)
 
         data = [
             {
@@ -462,10 +511,10 @@ class PatientAccessRequestsView(APIView):
                 "created_at": g.created_at.isoformat(),
                 "responded_at": g.responded_at.isoformat() if g.responded_at else None,
             }
-            for g in grants
+            for g in page
         ]
 
-        return Response(data)
+        return paginator.get_paginated_response(data)
 
 
 class RecordAccessGrantDetailView(APIView):
@@ -579,10 +628,6 @@ class ProviderGrantedRecordsView(APIView):
         except HealthcareProvider.DoesNotExist:
             return Response({"error": "Provider not found"}, status=status.HTTP_404_NOT_FOUND)
 
-        # Confirms this provider is actually the requester on THIS
-        # appointment — the equivalent of the relationship check
-        # ProviderPatientRelationshipRequired would have done, but scoped
-        # correctly to the specific consultation the grant belongs to.
         if appointment.provider_id != requesting_provider.id:
             return Response(
                 {"error": "This provider is not the requester on this appointment"},
@@ -603,13 +648,6 @@ class ProviderGrantedRecordsView(APIView):
                 status=status.HTTP_403_FORBIDDEN,
             )
 
-        # Access is scoped to the consultation it was granted for — the
-        # RecordAccessGrant model's own docstring says this is enforced
-        # at the API layer, but no existing view actually did it. Same
-        # 30-minute grace window already used elsewhere in this codebase
-        # (CALL_WINDOW_MS on the frontend, POLL_TOLERANCE for reminders)
-        # so a provider isn't cut off mid-review right as the appointment
-        # ends, but access doesn't stay open indefinitely either.
         from datetime import timedelta
         GRACE_PERIOD = timedelta(minutes=30)
         if timezone.now() > appointment.end_time + GRACE_PERIOD:
@@ -618,10 +656,6 @@ class ProviderGrantedRecordsView(APIView):
                 status=status.HTTP_403_FORBIDDEN,
             )
 
-        # Resolve which OTHER providers fall under this category label —
-        # categories are grouped by speciality/clinic_name string in
-        # ProviderPatientSummaryView, so mirror that exact logic here to
-        # stay consistent with what the patient was shown before approving.
         other_summaries = PatientProviderRecordSummary.objects.filter(
             patient_identity=patient_identity,
         ).exclude(provider=requesting_provider).select_related("provider", "provider__identity")
