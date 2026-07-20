@@ -9,6 +9,7 @@ from .views import (
     RecordAccessGrantDetailView,
     PatientSensitivityView,
     ProviderGrantedRecordsView,
+    PatientVitalsView,
 )
 from .pin_views import (
     RecordsPinStatusView,
@@ -22,6 +23,7 @@ urlpatterns = [
     path("patient/<uuid:patient_identity_id>/summary", PatientRecordSummaryView.as_view()),
     path("patient/<uuid:patient_identity_id>/timeline", PatientTimelineView.as_view()),
     path("patient/<uuid:patient_identity_id>/access-requests", PatientAccessRequestsView.as_view()),
+    path("patient/<uuid:patient_identity_id>/vitals", PatientVitalsView.as_view()),
     # Provider-facing (own records for a patient — no PIN, relationship-gated instead)
     path("provider/<uuid:provider_id>/patient/<uuid:patient_identity_id>/timeline", ProviderPatientTimelineView.as_view()),
     # Provider-facing (consultation panel)
@@ -39,5 +41,4 @@ urlpatterns = [
     path("pin/verify", RecordsPinVerifyView.as_view()),
     path("pin/change", RecordsPinChangeView.as_view()),
     path("pin/reset", RecordsPinResetView.as_view()),
-    path("patient/<uuid:patient_identity_id>/vitals", PatientVitalsView.as_view()),
 ]
