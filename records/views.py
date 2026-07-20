@@ -700,3 +700,100 @@ class ProviderGrantedRecordsView(APIView):
             "total": len(records),
             "records": records,
         })
+
+
+class PatientVitalsView(APIView):
+    """
+    Lightweight, no-PIN view of a patient's most recent vital sign readings,
+    pulled from AppointmentCapture values across ALL of the patient's
+    providers -- powers the "Recent Vitals" card on the health-portal
+    dashboard.
+
+    Deliberately NOT gated by RecordsUnlockRequired (unlike
+    PatientTimelineView) -- a quick vitals glance on the dashboard landing
+    page shouldn't require entering the records PIN first; that gate stays
+    reserved for full clinical notes/timeline. No permission_classes here
+    matches the same precedent already set by PatientRecordSummaryView
+    above, for similarly low-sensitivity, identity-scoped data.
+
+    Matches vitals by FIELD LABEL CONTENT (case-insensitive substring), not
+    fixed field ID -- field IDs are randomly generated per form and never
+    stable across different providers' forms. Only the label text ("Blood
+    Pressure (mmHg)", "Pulse (bpm)", etc.) is a consistent convention
+    across this codebase's forms, per the "Vital Signs" section confirmed
+    in provider form-builder.
+    """
+
+    VITAL_SPECS = [
+        {"key": "blood_pressure", "label": "Blood Pressure", "keywords": ["blood pressure"]},
+        {"key": "pulse", "label": "Pulse", "keywords": ["pulse", "heart rate"]},
+        {"key": "temperature", "label": "Temperature", "keywords": ["temperature"]},
+        {"key": "weight", "label": "Weight", "keywords": ["weight"]},
+        {"key": "height", "label": "Height", "keywords": ["height"]},
+    ]
+
+    def get(self, request, patient_identity_id):
+        try:
+            patient_identity = Identity.objects.get(id=patient_identity_id)
+        except Identity.DoesNotExist:
+            return Response({"error": "Patient not found"}, status=status.HTTP_404_NOT_FOUND)
+
+        from appointments.models import ProviderAppointment
+        import re
+
+        appointments = ProviderAppointment.objects.filter(
+            patient_identity=patient_identity,
+        ).exclude(status="cancelled").select_related(
+            "provider", "provider__identity"
+        ).prefetch_related("captures").order_by("-start_time")
+
+        latest = {}
+
+        for appt in appointments:
+            provider_name = None
+            if appt.provider and appt.provider.identity:
+                pi = appt.provider.identity
+                provider_name = f"Dr. {pi.first_name} {pi.last_name}"
+
+            for cap in appt.captures.all():
+                snapshot = cap.form_snapshot or []
+                label_map = {}
+                for section in snapshot:
+                    for field in section.get("fields", []):
+                        fid = field.get("id")
+                        if fid:
+                            label_map[fid] = field.get("label") or field.get("name") or ""
+
+                values = cap.values or {}
+                for field_id, raw_value in values.items():
+                    if field_id == "__form_snapshot__":
+                        continue
+                    label = label_map.get(field_id, "")
+                    if not label:
+                        continue
+                    if raw_value in (None, "", False):
+                        continue
+
+                    label_lower = label.lower()
+                    for spec in self.VITAL_SPECS:
+                        key = spec["key"]
+                        if key in latest:
+                            continue
+                        if any(kw in label_lower for kw in spec["keywords"]):
+                            unit_match = re.search(r"\(([^)]+)\)\s*$", label)
+                            latest[key] = {
+                                "key": key,
+                                "label": spec["label"],
+                                "value": str(raw_value),
+                                "unit": unit_match.group(1) if unit_match else None,
+                                "recorded_at": appt.start_time.isoformat(),
+                                "provider_name": provider_name,
+                            }
+                            break
+
+            if len(latest) == len(self.VITAL_SPECS):
+                break
+
+        ordered = [latest[spec["key"]] for spec in self.VITAL_SPECS if spec["key"] in latest]
+
+        return Response({"vitals": ordered})
