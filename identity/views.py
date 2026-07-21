@@ -5,6 +5,7 @@ from rest_framework.permissions import IsAuthenticated
 from rest_framework.exceptions import AuthenticationFailed
 from django.shortcuts import get_object_or_404
 from django.conf import settings
+from django.core.cache import cache
 
 from utils.code_generators import generate_code
 from django.core.mail import send_mail
@@ -106,6 +107,30 @@ def _identity_authorised(request, identity_id):
         return False
 
     return True
+
+
+def _cache_incr(key, timeout):
+    """
+    Increment a counter that may not exist yet, in a race-safe-enough way
+    for a single Postgres-backed cache table (DatabaseCache does the
+    increment as an UPDATE, so concurrent requests don't just clobber
+    each other's writes the way plain get/set would).
+
+    cache.add() sets the key ONLY if absent, seeding it at 1 with the
+    given timeout. If it already existed, cache.incr() bumps it without
+    touching its existing TTL -- exactly what a fixed rolling window
+    needs (the window started when the key was first seeded, not on
+    every subsequent request).
+    """
+    added = cache.add(key, 1, timeout)
+    if added:
+        return 1
+    try:
+        return cache.incr(key)
+    except ValueError:
+        # Key expired between add() and incr() (razor-thin race) -- reset it.
+        cache.set(key, 1, timeout)
+        return 1
 
 
 class RegisterView(APIView):
@@ -411,13 +436,36 @@ class RefreshTokenView(APIView):
         access_token = generateaccessToken(identity=identity_id)
         return Response({"a_token": access_token}, status=status.HTTP_200_OK)
 
+
 class SendOTPView(APIView):
-    # TODO (security): takes an arbitrary `user` (identity id) from the
-    # request body with no ownership check -- anyone can trigger an OTP
-    # resend for any identity by ID. Can't require IsAuthenticated the
-    # normal way since this runs pre-session (part of the login/verify
-    # flow) -- needs its own fix, e.g. rate-limiting by identity/IP.
-    # Tracked separately, not fixed in this pass.
+    """
+    FIX (security): previously took an arbitrary `user` (identity id) from
+    the request body with no ownership check AND no rate limiting --
+    anyone who had or guessed an identity_id could spam that person's
+    inbox indefinitely. Can't require IsAuthenticated the normal way since
+    this runs pre-session (part of the login/verify flow), so this is
+    fixed with rate limiting instead, keyed by identity_id:
+
+      - COOLDOWN: one send per identity per 60s, so a user double-tapping
+        "resend" doesn't invalidate their own in-flight code, and so a
+        single spammer can't fire requests back-to-back.
+      - HOURLY CAP: max 5 sends per identity per rolling hour, so even
+        respecting the cooldown, a spammer can't grind out dozens of
+        emails to the same inbox in a short window.
+
+    Ownership (anyone can still trigger a send for an identity_id they
+    don't own) is NOT fixed here -- that's inherent to this being a
+    pre-session endpoint reachable before any session exists (the
+    "forgot my code, resend it" flow can't require being logged in as
+    the account it's resending a code for). Rate limiting is the
+    correct control for this specific view; it cannot become fully
+    ownership-gated without breaking the flow it exists for.
+    """
+
+    SEND_COOLDOWN_SECONDS = 60
+    SEND_MAX_PER_WINDOW = 5
+    SEND_WINDOW_SECONDS = 3600
+
     def post(self, request):
         if not request.data:
             return Response({"error": "bad request"}, status=status.HTTP_400_BAD_REQUEST)
@@ -425,6 +473,25 @@ class SendOTPView(APIView):
         if not identity:
             return Response({"error": "user required"}, status=status.HTTP_400_BAD_REQUEST)
         identity = get_object_or_404(Identity, id=identity)
+        identity_id = str(identity.id)
+
+        cooldown_key = f"otp:send:cooldown:{identity_id}"
+        if cache.get(cooldown_key):
+            return Response(
+                {"error": "please wait before requesting another code"},
+                status=status.HTTP_429_TOO_MANY_REQUESTS,
+            )
+
+        count_key = f"otp:send:count:{identity_id}"
+        count = _cache_incr(count_key, self.SEND_WINDOW_SECONDS)
+        if count > self.SEND_MAX_PER_WINDOW:
+            return Response(
+                {"error": "too many code requests, please try again later"},
+                status=status.HTTP_429_TOO_MANY_REQUESTS,
+            )
+
+        cache.set(cooldown_key, True, self.SEND_COOLDOWN_SECONDS)
+
         otp = generate_code(length=6, digits_only=True)
         try:
             existing_otp = Otp.objects.get(identity_ref=identity)
@@ -447,25 +514,69 @@ class SendOTPView(APIView):
 
 
 class VerifyOTPView(APIView):
-    # TODO (security): same as SendOTPView -- `user` (identity id) taken
-    # from the request body with no ownership check, and OTP guessing
-    # isn't rate-limited (6-digit code, no lockout after N attempts).
-    # Tracked separately, not fixed in this pass.
+    """
+    FIX (security): previously took `user` (identity id) from the request
+    body with no ownership check and no attempt limiting -- a 6-digit OTP
+    is only 1,000,000 possibilities, brute-forceable by an automated
+    script hitting this endpoint repeatedly with the same identity_id.
+
+    Fixed with a cache-based lockout keyed by identity_id:
+      - After MAX_ATTEMPTS wrong guesses within ATTEMPT_WINDOW_SECONDS,
+        the identity is locked out for LOCKOUT_SECONDS -- verification
+        attempts return 429 regardless of the code supplied, without
+        even checking it against the DB.
+      - A successful verification clears both the attempt counter and
+        any lockout for that identity.
+
+    Ownership is not (and structurally cannot be) fixed here for the same
+    reason as SendOTPView -- this runs before a session exists.
+    """
+
+    MAX_ATTEMPTS = 5
+    ATTEMPT_WINDOW_SECONDS = 600  # 10 min -- matches the OTP's own expiry
+    LOCKOUT_SECONDS = 900  # 15 min
+
     def post(self, request):
         otp = request.data.get("otp")
         identity = request.data.get("user")
         if not request.data or not otp or not identity:
             return Response({"error": "bad request, please fill in all required fields"}, status=status.HTTP_400_BAD_REQUEST)
+
+        identity_id = str(identity)
+        lock_key = f"otp:verify:lock:{identity_id}"
+        if cache.get(lock_key):
+            return Response(
+                {"error": "too many failed attempts, please try again later"},
+                status=status.HTTP_429_TOO_MANY_REQUESTS,
+            )
+
         otp_instance = get_object_or_404(Otp, identity_ref=identity)
+
         if not otp_instance.code == otp or otp_instance.is_used:
+            self._register_failed_attempt(identity_id)
             return Response({"error": "invalid OTP code"}, status=status.HTTP_400_BAD_REQUEST)
+
         now = timezone.now()
         if now > (otp_instance.created_at + timedelta(minutes=10)):
             return Response({"error": "OTP expired, request another OTP"}, status=status.HTTP_400_BAD_REQUEST)
+
         otp_instance.is_used = True
         Identity.objects.filter(id=identity).update(email_verified=True)
         otp_instance.save()
+
+        # Success -- clear any accumulated attempt count/lockout so a
+        # later legitimate re-verification (e.g. a second OTP flow for
+        # this identity down the line) isn't penalised by past failures.
+        cache.delete(f"otp:verify:attempts:{identity_id}")
+        cache.delete(lock_key)
+
         return Response({"detail": "OTP verified"}, status=status.HTTP_200_OK)
+
+    def _register_failed_attempt(self, identity_id):
+        attempts_key = f"otp:verify:attempts:{identity_id}"
+        attempts = _cache_incr(attempts_key, self.ATTEMPT_WINDOW_SECONDS)
+        if attempts >= self.MAX_ATTEMPTS:
+            cache.set(f"otp:verify:lock:{identity_id}", True, self.LOCKOUT_SECONDS)
 
 
 class ResetPasswordView(APIView):
@@ -513,14 +624,7 @@ class IdentityAccountsView(APIView):
          the endpoint's ORIGINAL and still-primary use case.
       2. Any already-logged-in app calling this later with a real JWT.
 
-    FIX (previous pass): added permission_classes=[IsAuthenticated] here
-    to stop anyone reading/modifying any identity's accounts just by
-    knowing identity_id -- correct in isolation, but it broke case 1
-    entirely, since request.user is never populated pre-session. That
-    was the global login-loop regression ("Something went wrong").
-
-    FIX (this pass): permission_classes removed; replaced with
-    _identity_authorised(), which accepts EITHER a matching
+    Uses _identity_authorised(), which accepts EITHER a matching
     authenticated request.user OR a valid, unexpired auth_code for this
     identity via ?auth_tkn=. The auth_code is validated, not consumed --
     TokenView is still what deletes it, whenever the chosen app does its
