@@ -48,6 +48,22 @@ def _get_overlapping_appointment(provider, start_time, end_time, exclude_id=None
     return qs.first()
 
 
+def _snapshot_price(appointment):
+    """
+    Copies the current price/currency off appointment.service onto the
+    appointment itself, at the moment of booking. This is what makes
+    ProviderDashboardStatsView's revenue figures immune to a provider
+    later editing (or deleting) their service price list — see
+    price_at_booking / currency_at_booking on ProviderAppointment.
+    No-ops if the appointment has no service attached.
+    """
+    service = appointment.service
+    if service is not None:
+        appointment.price_at_booking = service.price
+        appointment.currency_at_booking = service.currency
+        appointment.save(update_fields=["price_at_booking", "currency_at_booking"])
+
+
 def _notify(recipient_identity, notification_type, title, message="", link="", appointment=None, for_provider=False):
     """
     appointment / for_provider: when provided, the email sent alongside
@@ -342,6 +358,7 @@ class PatientAppointmentView(APIView):
                     status=status.HTTP_409_CONFLICT,
                 )
             appointment = serializer.save(provider=provider)
+            _snapshot_price(appointment)
 
         patient_identity = find_identity_by_email(appointment.patient_email)
         if patient_identity:
@@ -548,6 +565,8 @@ class ProviderAppointmentView(APIView):
                         status=status.HTTP_409_CONFLICT,
                     )
                 appointment = serializer.save(provider=provider)
+
+        _snapshot_price(appointment)
 
         patient_identity = find_identity_by_email(appointment.patient_email)
         if patient_identity:
@@ -810,12 +829,17 @@ class ProviderDashboardStatsView(APIView):
             start_time__gte=now,
         ).count()
 
+        # NOTE: sums price_at_booking (a snapshot taken at booking time via
+        # _snapshot_price), NOT the live Service.price — so editing or
+        # deleting a service later no longer changes past months' reported
+        # revenue. See price_at_booking / currency_at_booking on
+        # ProviderAppointment.
         revenue_mtd_agg = ProviderAppointment.objects.filter(
             provider=provider,
             status="completed",
             start_time__date__gte=month_start,
-            service__price__isnull=False,
-        ).aggregate(total=Sum("service__price"))
+            price_at_booking__isnull=False,
+        ).aggregate(total=Sum("price_at_booking"))
         revenue_mtd = revenue_mtd_agg["total"] or 0
 
         # New vs returning patients this month. A patient is "new" if the
@@ -891,7 +915,7 @@ class ProviderDashboardStatsView(APIView):
         virtual_count = type_count_map.get("virtual", 0)
         physical_count = type_count_map.get("physical", 0)
 
-        # Revenue by service this month — same completed + priced-service
+        # Revenue by service this month — same completed + priced-snapshot
         # filter as revenue_mtd above, just grouped instead of summed flat,
         # so revenue_by_service always sums back to revenue_mtd.
         revenue_by_service_qs = (
@@ -899,10 +923,10 @@ class ProviderDashboardStatsView(APIView):
                 provider=provider,
                 status="completed",
                 start_time__date__gte=month_start,
-                service__price__isnull=False,
+                price_at_booking__isnull=False,
             )
             .values("service__name")
-            .annotate(total=Sum("service__price"))
+            .annotate(total=Sum("price_at_booking"))
             .order_by("-total")
         )
         revenue_by_service = [
