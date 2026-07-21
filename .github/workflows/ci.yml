@@ -14,7 +14,7 @@ jobs:
     runs-on: self-hosted
     environment: development
     steps:
-      - uses: actions/checkout@v3
+      - uses: actions/checkout@v7
       - name: Build and deploy to develop
         run: |
           docker-build veridoctor-api dev ./Dockerfile /home/veridoctor/veridoctor/env/.api-dev.env.sh -y
@@ -24,7 +24,7 @@ jobs:
     runs-on: self-hosted
     environment: development
     steps:
-        - uses: actions/checkout@v3
+        - uses: actions/checkout@v7
         - name: Build and deploy to prod
           run: |
             docker-build veridoctor-api prod ./Dockerfile -y
