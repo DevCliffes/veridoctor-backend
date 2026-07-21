@@ -58,6 +58,56 @@ class StatusView(APIView):
 FROM_EMAIL = settings.EMAIL_HOST_USER
 
 
+def _identity_authorised(request, identity_id):
+    """
+    Shared ownership check used by views that can legitimately be called
+    in TWO different auth states:
+
+      1. Fully authenticated -- request.user is a real, logged-in
+         Identity (normal JWTAuthentication via Authorization header),
+         checked against identity_id as usual.
+
+      2. Pre-session -- called from the login handoff page
+         (apps/web /auth/accounts/{id}) BEFORE any access token exists.
+         At this point all the caller has is the one-time auth_code
+         LoginView just issued, passed as ?auth_tkn=. We validate it
+         against the AuthCode row exactly like TokenView does, but
+         WITHOUT deleting it -- TokenView is still the thing that
+         consumes it later, once the user picks an account and the
+         chosen app (provider/health-portal) does its own real token
+         exchange via /identity/authorise. Consuming it here would
+         break that later exchange.
+
+    Returns True/False rather than raising, so callers can return their
+    own 403 response shape.
+    """
+    user = getattr(request, "user", None)
+    if user is not None and getattr(user, "is_authenticated", False):
+        if str(user.id) == str(identity_id):
+            return True
+
+    auth_tkn = request.query_params.get("auth_tkn")
+    if not auth_tkn:
+        return False
+
+    try:
+        temp_auth_code = AuthCode.objects.get(identity__id=identity_id)
+    except AuthCode.DoesNotExist:
+        return False
+
+    if temp_auth_code.code != auth_tkn:
+        return False
+
+    try:
+        jwt.decode(auth_tkn, settings.JWT_SECRET, algorithms=["HS256"])
+    except jwt.ExpiredSignatureError:
+        return False
+    except jwt.InvalidTokenError:
+        return False
+
+    return True
+
+
 class RegisterView(APIView):
     """
     GET/PATCH/DELETE act on an existing identity and require the caller
@@ -75,10 +125,10 @@ class RegisterView(APIView):
     populate correctly even with IsAuthenticated added. Removed so this
     view uses the same JWT auth as everywhere else.
 
-    CONFIRM BEFORE DEPLOYING: verify nothing else in the codebase (an
-    internal script, a webhook, an admin tool) actually depends on
-    TokenAuthentication working on this endpoint. If genuinely unused,
-    this removal is safe.
+    CONFIRMED SAFE TO DEPLOY: verified no Token.objects.create anywhere
+    in the codebase, rest_framework.authtoken isn't an installed app,
+    and a comment in identity/authentication.py already documents that
+    this project issues its own JWTs instead of DRF's token model.
     """
     queryset = Identity.objects.all()
 
@@ -455,16 +505,30 @@ class confirmResetPasswordView(APIView):
 
 class IdentityAccountsView(APIView):
     """
-    FIX: previously no permission_classes -- any caller could see which
-    account types exist for any identity (GET), or attach a new account
-    type -- including "healthcare_provider" -- to any identity (POST),
-    just by knowing identity_id. Now requires the caller to BE that
-    identity.
+    Two legitimate callers, two different auth states:
+
+      1. The pre-session login handoff page (apps/web /auth/accounts/{id})
+         -- calls this BEFORE any access token exists, using only the
+         one-time auth_code LoginView just issued (?auth_tkn=). This is
+         the endpoint's ORIGINAL and still-primary use case.
+      2. Any already-logged-in app calling this later with a real JWT.
+
+    FIX (previous pass): added permission_classes=[IsAuthenticated] here
+    to stop anyone reading/modifying any identity's accounts just by
+    knowing identity_id -- correct in isolation, but it broke case 1
+    entirely, since request.user is never populated pre-session. That
+    was the global login-loop regression ("Something went wrong").
+
+    FIX (this pass): permission_classes removed; replaced with
+    _identity_authorised(), which accepts EITHER a matching
+    authenticated request.user OR a valid, unexpired auth_code for this
+    identity via ?auth_tkn=. The auth_code is validated, not consumed --
+    TokenView is still what deletes it, whenever the chosen app does its
+    own real token exchange later.
     """
-    permission_classes = [IsAuthenticated]
 
     def get(self, request, identity_id):
-        if str(request.user.id) != str(identity_id):
+        if not _identity_authorised(request, identity_id):
             return Response(
                 {"error": "You do not have permission to view these accounts"},
                 status=status.HTTP_403_FORBIDDEN,
@@ -510,7 +574,7 @@ class IdentityAccountsView(APIView):
         )
 
     def post(self, request, identity_id):
-        if str(request.user.id) != str(identity_id):
+        if not _identity_authorised(request, identity_id):
             return Response(
                 {"error": "You do not have permission to modify this identity"},
                 status=status.HTTP_403_FORBIDDEN,
