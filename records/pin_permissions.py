@@ -25,21 +25,29 @@ class RecordsUnlockRequired(BasePermission):
     health records (e.g. PatientTimelineView).
     Frontend sends header: X-Records-Unlock: <token>
 
-    IMPORTANT: this only makes sense when request.user IS the patient
-    whose records are being viewed — it checks the unlock token against
-    request.user.id, not against any patient_identity_id in the URL. Do
-    NOT put this on a view a provider can call about a different
-    identity's records; request.user.id will be the provider's own id,
-    which will never match a token signed for the patient, so it will
-    unconditionally return False and return 403 to a caller who was
-    never supposed to be PIN-gated in the first place (this is exactly
-    what broke provider-side "Your records for this patient").
+    FIX: this previously only checked that request.user had unlocked
+    THEIR OWN records — it never compared that identity against the
+    patient_identity_id in the URL. That meant any authenticated patient
+    who unlocked their own PIN once could reuse that same valid token to
+    view ANY other patient's timeline just by changing the URL's
+    patient_identity_id. Now we require request.user to actually BE the
+    patient_identity_id being requested, in addition to holding a valid
+    unlock token for themselves.
+
+    Still only makes sense on views identifying the patient via a
+    `patient_identity_id` URL kwarg. Do NOT put this on a provider-facing
+    view — see ProviderPatientRelationshipRequired instead.
     """
     message = "Records PIN verification required or expired."
 
     def has_permission(self, request, view):
         if not request.user or not request.user.is_authenticated:
             return False
+
+        patient_identity_id = view.kwargs.get("patient_identity_id")
+        if not patient_identity_id or str(request.user.id) != str(patient_identity_id):
+            return False
+
         token = request.headers.get("X-Records-Unlock")
         return verify_unlock_token(token, request.user.id)
 
@@ -47,7 +55,6 @@ class RecordsUnlockRequired(BasePermission):
 class ProviderPatientRelationshipRequired(BasePermission):
     """
     Provider-side equivalent of RecordsUnlockRequired.
-
     NOTE: unlike RecordsUnlockRequired, this does NOT rely on
     request.user — the provider frontend does not currently attach a
     Bearer token to its requests (no provider endpoint in this codebase
@@ -56,6 +63,12 @@ class ProviderPatientRelationshipRequired(BasePermission):
     mean this permission fails unconditionally for every real provider
     request, which is exactly what caused the 401 -> redirect-to-login
     loop when this was first written against IsAuthenticated.
+
+    TODO (security): this is a known gap, tracked separately — it grants
+    access based on URL-supplied IDs having a real relationship, not on
+    verifying the caller's identity. Needs provider frontend to attach
+    auth tokens before this can check request.user like its patient-side
+    counterpart does. See conversation/ticket on provider auth rollout.
 
     Access is granted if the provider identified by the `provider_id`
     URL kwarg has at least one non-cancelled ProviderAppointment with the
