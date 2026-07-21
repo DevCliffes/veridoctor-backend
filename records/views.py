@@ -522,6 +522,8 @@ class RecordAccessGrantDetailView(APIView):
     Patient approves or denies an access request.
     PATCH /records/access-grants/<grant_id>
     """
+    permission_classes = [IsAuthenticated]
+
     def patch(self, request, grant_id):
         new_status = request.data.get("status")
         if new_status not in ("approved", "denied"):
@@ -534,6 +536,15 @@ class RecordAccessGrantDetailView(APIView):
             grant = RecordAccessGrant.objects.get(id=grant_id)
         except RecordAccessGrant.DoesNotExist:
             return Response({"error": "Grant not found"}, status=status.HTTP_404_NOT_FOUND)
+
+        # FIX: previously anyone (authenticated or not) could approve/deny
+        # any patient's access grant just by knowing the grant_id. Now we
+        # require the caller to BE the patient this grant belongs to.
+        if str(request.user.id) != str(grant.patient_identity_id):
+            return Response(
+                {"error": "You do not have permission to respond to this access request"},
+                status=status.HTTP_403_FORBIDDEN,
+            )
 
         grant.status = new_status
         grant.responded_at = timezone.now()
