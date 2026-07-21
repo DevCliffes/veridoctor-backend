@@ -1,6 +1,7 @@
 from rest_framework.views import APIView
 from rest_framework.response import Response
 from rest_framework import status
+from rest_framework.permissions import IsAuthenticated
 from rest_framework.exceptions import AuthenticationFailed
 from django.shortcuts import get_object_or_404
 from django.conf import settings
@@ -10,7 +11,6 @@ from django.core.mail import send_mail
 from django.utils import timezone
 from django.contrib.auth import authenticate, login
 from datetime import timedelta
-from rest_framework.authentication import TokenAuthentication
 
 from .serializers import IdentitySerializer, HealthcareProviderAccountSerializer
 from .models import (
@@ -59,12 +59,47 @@ FROM_EMAIL = settings.EMAIL_HOST_USER
 
 
 class RegisterView(APIView):
-    authentication_classes = [TokenAuthentication]
+    """
+    GET/PATCH/DELETE act on an existing identity and require the caller
+    to BE that identity. POST is signup and must stay public.
+
+    FIX: this class previously declared
+    `authentication_classes = [TokenAuthentication]` -- DRF's built-in
+    TokenAuthentication, a completely different mechanism from
+    identity.authentication.JWTAuthentication, which every other view in
+    this project relies on via the global DEFAULT_AUTHENTICATION_CLASSES
+    setting and which nothing in this codebase actually issues tokens
+    for (no Token.objects.create anywhere, no Authorization: Token
+    <key> usage). Declaring it here silently overrode the global JWT
+    auth for this view only, meaning request.user would likely never
+    populate correctly even with IsAuthenticated added. Removed so this
+    view uses the same JWT auth as everywhere else.
+
+    CONFIRM BEFORE DEPLOYING: verify nothing else in the codebase (an
+    internal script, a webhook, an admin tool) actually depends on
+    TokenAuthentication working on this endpoint. If genuinely unused,
+    this removal is safe.
+    """
     queryset = Identity.objects.all()
+
+    def get_permissions(self):
+        if self.request.method == "POST":
+            return []
+        return [IsAuthenticated()]
 
     def get(self, request, identity_id):
         if not identity_id:
             return Response({"error": "bad request"}, status=status.HTTP_400_BAD_REQUEST)
+
+        # FIX: previously no permission check at all -- any caller could
+        # read any identity's full profile (name, email, phone, gender,
+        # insurances) just by knowing identity_id.
+        if str(request.user.id) != str(identity_id):
+            return Response(
+                {"error": "You do not have permission to view this profile"},
+                status=status.HTTP_403_FORBIDDEN,
+            )
+
         identity = get_object_or_404(Identity, id=identity_id)
         serializer = IdentitySerializer(identity)
         data = serializer.data
@@ -158,6 +193,15 @@ class RegisterView(APIView):
     def patch(self, request, identity_id):
         if not request.data or not identity_id:
             return Response({"error": "bad request"}, status=status.HTTP_400_BAD_REQUEST)
+
+        # FIX: previously anyone could update any identity's profile
+        # fields (including insurances) just by knowing identity_id.
+        if str(request.user.id) != str(identity_id):
+            return Response(
+                {"error": "You do not have permission to modify this profile"},
+                status=status.HTTP_403_FORBIDDEN,
+            )
+
         identity = get_object_or_404(Identity, id=identity_id)
 
         insurances = request.data.get("insurances", None)
@@ -189,12 +233,23 @@ class RegisterView(APIView):
     def delete(self, request, identity_id):
         if not identity_id:
             return Response({"error": "bad request"}, status=status.HTTP_400_BAD_REQUEST)
+
+        # FIX: previously anyone could deactivate any account just by
+        # knowing identity_id -- an unauthenticated way to lock any user
+        # out of their own account.
+        if str(request.user.id) != str(identity_id):
+            return Response(
+                {"error": "You do not have permission to deactivate this account"},
+                status=status.HTTP_403_FORBIDDEN,
+            )
+
         identity = get_object_or_404(Identity, id=identity_id)
         identity.is_active = False
         identity.email_verified = False
         identity.deleted_at = timezone.now()
         identity.save()
         return Response({}, status=status.HTTP_204_NO_CONTENT)
+
 
 class LoginView(APIView):
     # FIX: explicitly public. Previously this view had no authentication_classes
@@ -307,6 +362,12 @@ class RefreshTokenView(APIView):
         return Response({"a_token": access_token}, status=status.HTTP_200_OK)
 
 class SendOTPView(APIView):
+    # TODO (security): takes an arbitrary `user` (identity id) from the
+    # request body with no ownership check -- anyone can trigger an OTP
+    # resend for any identity by ID. Can't require IsAuthenticated the
+    # normal way since this runs pre-session (part of the login/verify
+    # flow) -- needs its own fix, e.g. rate-limiting by identity/IP.
+    # Tracked separately, not fixed in this pass.
     def post(self, request):
         if not request.data:
             return Response({"error": "bad request"}, status=status.HTTP_400_BAD_REQUEST)
@@ -336,6 +397,10 @@ class SendOTPView(APIView):
 
 
 class VerifyOTPView(APIView):
+    # TODO (security): same as SendOTPView -- `user` (identity id) taken
+    # from the request body with no ownership check, and OTP guessing
+    # isn't rate-limited (6-digit code, no lockout after N attempts).
+    # Tracked separately, not fixed in this pass.
     def post(self, request):
         otp = request.data.get("otp")
         identity = request.data.get("user")
@@ -389,7 +454,22 @@ class confirmResetPasswordView(APIView):
 
 
 class IdentityAccountsView(APIView):
+    """
+    FIX: previously no permission_classes -- any caller could see which
+    account types exist for any identity (GET), or attach a new account
+    type -- including "healthcare_provider" -- to any identity (POST),
+    just by knowing identity_id. Now requires the caller to BE that
+    identity.
+    """
+    permission_classes = [IsAuthenticated]
+
     def get(self, request, identity_id):
+        if str(request.user.id) != str(identity_id):
+            return Response(
+                {"error": "You do not have permission to view these accounts"},
+                status=status.HTTP_403_FORBIDDEN,
+            )
+
         identity = get_object_or_404(Identity, id=identity_id)
         patient_account = patientAccount.objects.filter(identity__id=identity_id).first()
         facility_manager_account = FacilityManagerAccount.objects.filter(identity__id=identity_id).first()
@@ -430,6 +510,12 @@ class IdentityAccountsView(APIView):
         )
 
     def post(self, request, identity_id):
+        if str(request.user.id) != str(identity_id):
+            return Response(
+                {"error": "You do not have permission to modify this identity"},
+                status=status.HTTP_403_FORBIDDEN,
+            )
+
         account_type = request.data.get("account_type")
         if not request.data or not account_type:
             return Response({"error": "bad request"}, status=status.HTTP_400_BAD_REQUEST)
@@ -505,6 +591,13 @@ class IdentityAccountsView(APIView):
 
 
 class ActivateAccountView(APIView):
+    # TODO: this method body is currently just `pass` after the guard
+    # clause -- falls through and returns None, which DRF will likely
+    # error on. Needs a real implementation; flagging as a separate bug
+    # from auth. Added IsAuthenticated as a baseline so this isn't wide
+    # open once someone does implement it.
+    permission_classes = [IsAuthenticated]
+
     def post(self, request, account_type, init_model_id):
         if not request.data or account_type not in ACCOUNT_TYPES:
             return Response({"error": "bad request"}, status=status.HTTP_400_BAD_REQUEST)
@@ -512,6 +605,11 @@ class ActivateAccountView(APIView):
 
 
 class DeactivateAccountView(APIView):
+    # TODO: currently a no-op -- always returns success without touching
+    # the DB. Add an ownership check here once this actually deactivates
+    # something. Added IsAuthenticated as a baseline in the meantime.
+    permission_classes = [IsAuthenticated]
+
     def post(self, request, identity_id, account_type):
         if account_type not in ACCOUNT_TYPES:
             return Response({"error": "invalid account type"}, status=status.HTTP_400_BAD_REQUEST)
@@ -519,7 +617,20 @@ class DeactivateAccountView(APIView):
 
 
 class DeactivateIdentityView(APIView):
+    """
+    FIX: previously no permission_classes -- anyone could deactivate any
+    account just by knowing identity_id. Now requires the caller to BE
+    that identity.
+    """
+    permission_classes = [IsAuthenticated]
+
     def post(self, request, identity_id):
+        if str(request.user.id) != str(identity_id):
+            return Response(
+                {"error": "You do not have permission to deactivate this account"},
+                status=status.HTTP_403_FORBIDDEN,
+            )
+
         identity = get_object_or_404(Identity, id=identity_id)
         identity.is_active = False
         identity.save()
