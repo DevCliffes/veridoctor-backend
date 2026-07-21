@@ -184,13 +184,13 @@ class ProviderPatientTimelineView(APIView):
     Gated by ProviderPatientRelationshipRequired (imported from
     pin_permissions above), which checks an existing appointment
     relationship using provider_id/patient_identity_id taken directly
-    from the URL -- matching how every other provider view in this
-    codebase identifies the requester, since the provider frontend does
-    not attach an Authorization header and IsAuthenticated would
-    therefore reject every legitimate request.
+    from the URL.
 
-    TODO (security): ProviderPatientRelationshipRequired does not verify
-    request.user against provider_id -- pending provider-auth rollout.
+    FIX: apps/provider (provider.veridoctor.com) attaches a Bearer token
+    via maybeAuthoriseProvider() on every non-public request.
+    ProviderPatientRelationshipRequired now verifies request.user against
+    provider_id in addition to its existing appointment-relationship
+    check -- see pin_permissions.py.
     """
     permission_classes = [ProviderPatientRelationshipRequired]
 
@@ -288,12 +288,15 @@ class ProviderPatientTimelineView(APIView):
 
 class ProviderPatientSummaryView(APIView):
     """
-    TODO (security): no permission_classes -- this endpoint currently
-    returns PHI (DOB, blood type, allergies, insurances, other providers'
-    record categories) to any caller who knows/guesses an appointment_id.
-    Pending provider-auth rollout so this can require IsAuthenticated and
-    verify request.user against appointment.provider.
+    FIX: previously no permission_classes -- any caller could pull PHI
+    (DOB, blood type, allergies, insurances, other providers' record
+    categories) for any appointment_id. apps/provider (provider.veridoctor.com)
+    attaches a Bearer token via maybeAuthoriseProvider() on every request,
+    so request.user is reliably populated -- now requires the caller to BE
+    the provider on this appointment.
     """
+    permission_classes = [IsAuthenticated]
+
     def get(self, request, appointment_id):
         from appointments.models import ProviderAppointment
         from provider.models import Prescription
@@ -304,6 +307,12 @@ class ProviderPatientSummaryView(APIView):
             ).get(id=appointment_id)
         except ProviderAppointment.DoesNotExist:
             return Response({"error": "Appointment not found"}, status=status.HTTP_404_NOT_FOUND)
+
+        if str(request.user.id) != str(appointment.provider.identity_id):
+            return Response(
+                {"error": "You are not the provider on this appointment"},
+                status=status.HTTP_403_FORBIDDEN,
+            )
 
         patient_identity = appointment.patient_identity
         if not patient_identity:
@@ -408,11 +417,16 @@ class ProviderPatientSummaryView(APIView):
 
 class RecordAccessRequestView(APIView):
     """
-    TODO (security): no permission_classes, and provider_identity_id is
+    FIX: previously no permission_classes, and provider_identity_id was
     taken directly from the request body with no check that the caller
-    IS that provider -- anyone can create access-grant requests
-    impersonating any provider. Pending provider-auth rollout.
+    IS that provider -- anyone could create access-grant requests
+    impersonating any provider. apps/provider attaches a Bearer token on
+    every request, so this now requires the caller to BE the
+    provider_identity_id claimed in the body, and to actually be the
+    provider on the named appointment.
     """
+    permission_classes = [IsAuthenticated]
+
     def post(self, request):
         from appointments.models import ProviderAppointment
 
@@ -426,11 +440,23 @@ class RecordAccessRequestView(APIView):
                 status=status.HTTP_400_BAD_REQUEST,
             )
 
+        if str(request.user.id) != str(provider_identity_id):
+            return Response(
+                {"error": "provider_identity_id must match the authenticated provider"},
+                status=status.HTTP_403_FORBIDDEN,
+            )
+
         try:
             appointment = ProviderAppointment.objects.get(id=appointment_id)
             provider = HealthcareProvider.objects.get(identity__id=provider_identity_id)
         except (ProviderAppointment.DoesNotExist, HealthcareProvider.DoesNotExist):
             return Response({"error": "Appointment or provider not found"}, status=status.HTTP_404_NOT_FOUND)
+
+        if appointment.provider_id != provider.id:
+            return Response(
+                {"error": "This provider is not the requester on this appointment"},
+                status=status.HTTP_403_FORBIDDEN,
+            )
 
         patient_identity = appointment.patient_identity
         if not patient_identity:
@@ -667,14 +693,23 @@ class ProviderGrantedRecordsView(APIView):
     RecordAccessGrant exists for this exact appointment/category, and that
     it hasn't expired.
 
-    TODO (security): all of the checks below compare URL-supplied IDs
-    against each other for internal consistency, but never verify
-    request.user against provider_id -- pending provider-auth rollout.
+    FIX: previously all checks below compared URL-supplied IDs against
+    each other for internal consistency, but never verified request.user
+    against provider_id. apps/provider attaches a Bearer token on every
+    request, so this now requires the caller to BE the provider_id in
+    the URL before anything else runs.
     """
+    permission_classes = [IsAuthenticated]
 
     def get(self, request, provider_id, appointment_id, category):
         from appointments.models import ProviderAppointment
         from provider.models import Prescription
+
+        if str(request.user.id) != str(provider_id):
+            return Response(
+                {"error": "You are not authorised to view records as this provider"},
+                status=status.HTTP_403_FORBIDDEN,
+            )
 
         try:
             appointment = ProviderAppointment.objects.select_related(
