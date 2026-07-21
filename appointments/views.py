@@ -966,3 +966,4 @@ class ProviderDashboardStatsView(APIView):
             "physical_count": physical_count,
             "revenue_by_service": revenue_by_service,
         })
+
