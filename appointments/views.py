@@ -491,8 +491,12 @@ class PatientAppointmentView(APIView):
 
 
 class ProviderAppointmentView(APIView):
+    pagination_class = AppointmentPagination
+
     def get(self, request, identity_id):
         filter_type = request.query_params.get("filter", "upcoming")
+        start_param = request.query_params.get("start")
+        end_param = request.query_params.get("end")
         now = timezone.now()
 
         try:
@@ -500,23 +504,39 @@ class ProviderAppointmentView(APIView):
         except HealthcareProvider.DoesNotExist:
             return Response({"error": "Provider not found"}, status=status.HTTP_404_NOT_FOUND)
 
+        # FIX: was missing provider__identity, causing an N+1 -- every row
+        # serialized calls appointment.provider.identity.* for
+        # provider_first_name/provider_last_name/provider_id (see
+        # ProviderAppointmentSerializer), which is 2 extra queries per row
+        # without this. patient_identity needs no join: it's a plain FK
+        # field on the serializer, rendered as just the id.
         qs = ProviderAppointment.objects.filter(
             provider=provider
-        ).select_related("service")
+        ).select_related("service", "provider__identity")
 
         if filter_type == "today":
             qs = qs.filter(start_time__date=now.date()).order_by("start_time")
         elif filter_type == "past":
             qs = qs.filter(end_time__lt=now).order_by("-start_time")
         elif filter_type == "all":
-            qs = qs.order_by("start_time")
+            qs = qs.order_by("-start_time")
         else:
             qs = qs.filter(start_time__gte=now).exclude(
                 status__in=["cancelled", "no-show"]
             ).order_by("start_time")
 
-        serializer = ProviderAppointmentSerializer(qs, many=True)
-        return Response(serializer.data)
+        # NEW: optional date-window bounds, used by the Schedule calendar
+        # (filter=all) so it isn't forced to pull a provider's entire
+        # booking history just to render a ~67-day calendar view.
+        if start_param:
+            qs = qs.filter(end_time__gte=start_param)
+        if end_param:
+            qs = qs.filter(start_time__lte=end_param)
+
+        paginator = self.pagination_class()
+        page = paginator.paginate_queryset(qs, request)
+        serializer = ProviderAppointmentSerializer(page, many=True)
+        return paginator.get_paginated_response(serializer.data)
 
     def post(self, request, identity_id):
         try:
