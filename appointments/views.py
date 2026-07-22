@@ -10,6 +10,7 @@ from rest_framework.views import APIView
 from .models import ProviderAppointment, AppointmentCapture
 from .serializers import ProviderAppointmentSerializer, AppointmentCaptureSerializer
 from records.services import find_identity_by_email, refresh_record_summary
+from .pagination import AppointmentPagination
 
 
 # Statuses that occupy a real slot on the calendar — a cancelled or
