@@ -988,3 +988,89 @@ class ProviderDashboardStatsView(APIView):
             "revenue_by_service": revenue_by_service,
         })
 
+# Add these two view classes to appointments/views.py (same file as
+# ProviderAppointmentView, AppointmentCaptureView, etc.), and register the
+# URLs alongside your other provider/appointments/* routes:
+#
+#   path("provider/<uuid:identity_id>/appointments/incomplete-notes",
+#        ProviderIncompleteNotesView.as_view()),
+#   path("provider/<uuid:identity_id>/appointments/with-messages",
+#        ProviderMessagedAppointmentsView.as_view()),
+#
+# Both reuse HealthcareProvider / ProviderAppointment / AppointmentCapture,
+# already imported at the top of this file.
+
+from django.db.models import Q
+
+
+class ProviderIncompleteNotesView(APIView):
+    """
+    Appointments that have concluded -- either explicitly marked
+    "completed", or past their end_time while still sitting in
+    scheduled/confirmed/in-progress (i.e. never resolved) -- but have no
+    AppointmentCapture saved against them at all. Deliberately excludes
+    appointments still in the future: there's nothing "overdue" about
+    notes for a visit that hasn't happened yet, and excludes
+    cancelled/no-show/rescheduled, since those were never going to
+    produce clinical notes in the first place.
+    """
+    def get(self, request, identity_id):
+        try:
+            provider = HealthcareProvider.objects.get(identity__id=identity_id)
+        except HealthcareProvider.DoesNotExist:
+            return Response({"error": "Provider not found"}, status=status.HTTP_404_NOT_FOUND)
+
+        now = timezone.now()
+        qs = (
+            ProviderAppointment.objects.filter(provider=provider)
+            .filter(
+                Q(status="completed")
+                | Q(end_time__lt=now, status__in=["scheduled", "confirmed", "in-progress"])
+            )
+            .exclude(id__in=AppointmentCapture.objects.values("appointment_id"))
+            .order_by("start_time")[:20]
+        )
+
+        data = [
+            {
+                "id": str(a.id),
+                "patient_name": f"{a.patient_first_name} {a.patient_last_name}".strip(),
+                "appointment_date": a.start_time.isoformat(),
+            }
+            for a in qs
+        ]
+        return Response(data)
+
+
+class ProviderMessagedAppointmentsView(APIView):
+    """
+    Upcoming appointments (end_time still in the future, not
+    cancelled/no-show/completed) that carry a non-empty booking message
+    -- the optional "message" field captured at booking time. An item
+    naturally drops off this list once the appointment concludes; no
+    read/unread tracking needed.
+    """
+    def get(self, request, identity_id):
+        try:
+            provider = HealthcareProvider.objects.get(identity__id=identity_id)
+        except HealthcareProvider.DoesNotExist:
+            return Response({"error": "Provider not found"}, status=status.HTTP_404_NOT_FOUND)
+
+        now = timezone.now()
+        qs = (
+            ProviderAppointment.objects.filter(provider=provider, end_time__gte=now)
+            .exclude(status__in=["cancelled", "no-show", "completed"])
+            .exclude(message="")
+            .order_by("start_time")[:20]
+        )
+
+        data = [
+            {
+                "id": str(a.id),
+                "patient_name": f"{a.patient_first_name} {a.patient_last_name}".strip(),
+                "appointment_date": a.start_time.isoformat(),
+                "message": a.message,
+            }
+            for a in qs
+        ]
+        return Response(data)
