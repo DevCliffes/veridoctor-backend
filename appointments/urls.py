@@ -23,4 +23,5 @@ urlpatterns = [
     path("provider/<uuid:identity_id>/appointments/incomplete-notes/", ProviderIncompleteNotesView.as_view()),
     # Pending-actions panel — upcoming appointments carrying a booking message
     path("provider/<uuid:identity_id>/appointments/with-messages/", ProviderMessagedAppointmentsView.as_view()),
+    path("provider/<uuid:identity_id>/appointments/monthly-trend/", ProviderMonthlyTrendView.as_view()),
 ]
