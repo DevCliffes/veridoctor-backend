@@ -11,6 +11,8 @@ from .models import ProviderAppointment, AppointmentCapture
 from .serializers import ProviderAppointmentSerializer, AppointmentCaptureSerializer
 from records.services import find_identity_by_email, refresh_record_summary
 from .pagination import AppointmentPagination
+from django.db.models.functions import TruncMonth
+from django.db.models import Sum, Q as MonthlyQ
 
 
 # Statuses that occupy a real slot on the calendar — a cancelled or
@@ -1074,3 +1076,124 @@ class ProviderMessagedAppointmentsView(APIView):
             for a in qs
         ]
         return Response(data)
+
+# Add to appointments/views.py, alongside ProviderIncompleteNotesView /
+# ProviderMessagedAppointmentsView. Needs one extra import at the top:
+#   from django.db.models.functions import TruncMonth
+#   from dateutil.relativedelta import relativedelta   # already a Django dep via django-dateutil? if not, use timedelta math below instead
+
+
+
+
+class ProviderMonthlyTrendView(APIView):
+    """
+    Last N months (default 6) of two independent breakdowns, grouped by
+    calendar month of start_time:
+
+      - revenue: completed appointments' price_at_booking summed, vs
+        "lost" revenue -- the price_at_booking that would have been
+        earned from appointments that ended up cancelled or no-show.
+        Both sums rely on price_at_booking surviving status changes,
+        which it does (nothing in ProviderAppointment.save() or any
+        view clears it on cancellation).
+      - appointment_count: split by appointment_type (virtual/physical),
+        counted regardless of status -- this describes booking behavior,
+        not outcome.
+
+    Response shape:
+      [
+        {
+          "month": "2026-02",
+          "completed_revenue": 50000.0,
+          "lost_revenue": 8000.0,
+          "virtual_count": 44,
+          "physical_count": 14
+        },
+        ...
+      ]
+    """
+    def get(self, request, identity_id):
+        try:
+            provider = HealthcareProvider.objects.get(identity__id=identity_id)
+        except HealthcareProvider.DoesNotExist:
+            return Response({"error": "Provider not found"}, status=status.HTTP_404_NOT_FOUND)
+
+        try:
+            months_back = int(request.query_params.get("months", 6))
+        except ValueError:
+            months_back = 6
+        months_back = max(1, min(months_back, 24))
+
+        now = timezone.now()
+        # First day of the month, months_back-1 months ago, so "6" means
+        # "this month plus the 5 before it" -- matches the weekly_data
+        # pattern elsewhere in this file (inclusive of today's period).
+        current_month_start = now.replace(day=1, hour=0, minute=0, second=0, microsecond=0)
+        year = current_month_start.year
+        month = current_month_start.month - (months_back - 1)
+        while month <= 0:
+            month += 12
+            year -= 1
+        range_start = current_month_start.replace(year=year, month=month)
+
+        qs = ProviderAppointment.objects.filter(
+            provider=provider,
+            start_time__gte=range_start,
+        ).annotate(month=TruncMonth("start_time"))
+
+        revenue_rows = (
+            qs.filter(price_at_booking__isnull=False)
+            .values("month")
+            .annotate(
+                completed_revenue=Sum(
+                    "price_at_booking", filter=MonthlyQ(status="completed")
+                ),
+                lost_revenue=Sum(
+                    "price_at_booking",
+                    filter=MonthlyQ(status__in=["cancelled", "no-show"]),
+                ),
+            )
+        )
+        revenue_map = {
+            row["month"].strftime("%Y-%m"): {
+                "completed_revenue": float(row["completed_revenue"] or 0),
+                "lost_revenue": float(row["lost_revenue"] or 0),
+            }
+            for row in revenue_rows
+        }
+
+        type_rows = (
+            qs.values("month")
+            .annotate(
+                virtual_count=Count("id", filter=MonthlyQ(appointment_type="virtual")),
+                physical_count=Count("id", filter=MonthlyQ(appointment_type="physical")),
+            )
+        )
+        type_map = {
+            row["month"].strftime("%Y-%m"): {
+                "virtual_count": row["virtual_count"],
+                "physical_count": row["physical_count"],
+            }
+            for row in type_rows
+        }
+
+        # Build a complete month sequence so months with zero activity
+        # still appear as 0s, keeping the chart's x-axis continuous
+        # rather than skipping gaps.
+        result = []
+        cursor_year, cursor_month = range_start.year, range_start.month
+        for _ in range(months_back):
+            key = f"{cursor_year:04d}-{cursor_month:02d}"
+            rev = revenue_map.get(key, {"completed_revenue": 0.0, "lost_revenue": 0.0})
+            typ = type_map.get(key, {"virtual_count": 0, "physical_count": 0})
+            result.append({
+                "month": key,
+                **rev,
+                **typ,
+            })
+            cursor_month += 1
+            if cursor_month > 12:
+                cursor_month = 1
+                cursor_year += 1
+
+        return Response(result)
