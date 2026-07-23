@@ -13,6 +13,9 @@ from records.services import find_identity_by_email, refresh_record_summary
 from .pagination import AppointmentPagination
 from django.db.models.functions import TruncMonth
 from django.db.models import Sum, Q as MonthlyQ
+from datetime import timedelta, date as date_cls
+from calendar import monthrange
+from django.db.models.functions import TruncDate
 
 
 # Statuses that occupy a real slot on the calendar — a cancelled or
@@ -1195,5 +1198,124 @@ class ProviderMonthlyTrendView(APIView):
             if cursor_month > 12:
                 cursor_month = 1
                 cursor_year += 1
+
+        return Response(result)
+
+# Add these imports near your other django.db.models.functions import (if
+# you don't already have TruncDate from the monthly-trend work):
+#   from datetime import timedelta, date as date_cls
+#   from calendar import monthrange
+#   from django.db.models.functions import TruncDate
+# Q should already be imported from the pending-actions views step.
+
+
+
+
+class ProviderAppointmentTrendView(APIView):
+    """
+    Day-by-day revenue and appointment-type breakdown, filtered by a
+    date range. Powers the dashboard's revenue bar chart and
+    appointment-type line chart (replaces the old static WeeklyChart,
+    which only ever showed a fixed last-7-days window with no filters).
+
+    Query params:
+      range   -- one of "last_7_days", "this_month" (default),
+                 "last_30_days", "month"
+      month   -- required when range="month", format "YYYY-MM"
+
+    Response: list of
+      {
+        "date": "2026-07-01",
+        "completed_revenue": 4200.0,
+        "lost_revenue": 0.0,
+        "virtual_count": 3,
+        "physical_count": 1
+      }
+    ordered oldest to newest, one entry per calendar day in range --
+    days with zero activity still appear, zeroed, so the chart's x-axis
+    stays continuous rather than skipping gaps.
+    """
+    def get(self, request, identity_id):
+        try:
+            provider = HealthcareProvider.objects.get(identity__id=identity_id)
+        except HealthcareProvider.DoesNotExist:
+            return Response({"error": "Provider not found"}, status=status.HTTP_404_NOT_FOUND)
+
+        range_param = request.query_params.get("range", "this_month")
+        today = timezone.localdate()
+
+        if range_param == "last_7_days":
+            start_date = today - timedelta(days=6)
+            end_date = today
+        elif range_param == "last_30_days":
+            start_date = today - timedelta(days=29)
+            end_date = today
+        elif range_param == "month":
+            month_param = request.query_params.get("month")
+            try:
+                year_str, month_str = month_param.split("-")
+                year, month = int(year_str), int(month_str)
+                start_date = date_cls(year, month, 1)
+            except (AttributeError, ValueError):
+                return Response(
+                    {"error": "month is required and must be in YYYY-MM format when range=month"},
+                    status=status.HTTP_400_BAD_REQUEST,
+                )
+            last_day = monthrange(year, month)[1]
+            month_end = date_cls(year, month, last_day)
+            # Don't show future days of a month that hasn't finished yet
+            end_date = min(month_end, today)
+        else:  # this_month (default)
+            start_date = today.replace(day=1)
+            end_date = today
+
+        if start_date > end_date:
+            return Response({"error": "Invalid date range"}, status=status.HTTP_400_BAD_REQUEST)
+
+        qs = ProviderAppointment.objects.filter(
+            provider=provider,
+            start_time__date__gte=start_date,
+            start_time__date__lte=end_date,
+        ).annotate(day=TruncDate("start_time"))
+
+        revenue_rows = (
+            qs.filter(price_at_booking__isnull=False)
+            .values("day")
+            .annotate(
+                completed_revenue=Sum("price_at_booking", filter=Q(status="completed")),
+                lost_revenue=Sum("price_at_booking", filter=Q(status__in=["cancelled", "no-show"])),
+            )
+        )
+        revenue_map = {
+            row["day"].isoformat(): {
+                "completed_revenue": float(row["completed_revenue"] or 0),
+                "lost_revenue": float(row["lost_revenue"] or 0),
+            }
+            for row in revenue_rows
+        }
+
+        type_rows = (
+            qs.values("day")
+            .annotate(
+                virtual_count=Count("id", filter=Q(appointment_type="virtual")),
+                physical_count=Count("id", filter=Q(appointment_type="physical")),
+            )
+        )
+        type_map = {
+            row["day"].isoformat(): {
+                "virtual_count": row["virtual_count"],
+                "physical_count": row["physical_count"],
+            }
+            for row in type_rows
+        }
+
+        result = []
+        cursor = start_date
+        while cursor <= end_date:
+            key = cursor.isoformat()
+            rev = revenue_map.get(key, {"completed_revenue": 0.0, "lost_revenue": 0.0})
+            typ = type_map.get(key, {"virtual_count": 0, "physical_count": 0})
+            result.append({"date": key, **rev, **typ})
+            cursor += timedelta(days=1)
 
         return Response(result)
