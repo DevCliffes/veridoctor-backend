@@ -10,6 +10,12 @@ from rest_framework.views import APIView
 from .models import ProviderAppointment, AppointmentCapture
 from .serializers import ProviderAppointmentSerializer, AppointmentCaptureSerializer
 from records.services import find_identity_by_email, refresh_record_summary
+from .pagination import AppointmentPagination
+from django.db.models.functions import TruncMonth
+from django.db.models import Sum, Q as MonthlyQ
+from datetime import timedelta, date as date_cls
+from calendar import monthrange
+from django.db.models.functions import TruncDate
 
 
 # Statuses that occupy a real slot on the calendar — a cancelled or
@@ -46,6 +52,22 @@ def _get_overlapping_appointment(provider, start_time, end_time, exclude_id=None
     if exclude_id:
         qs = qs.exclude(id=exclude_id)
     return qs.first()
+
+
+def _snapshot_price(appointment):
+    """
+    Copies the current price/currency off appointment.service onto the
+    appointment itself, at the moment of booking. This is what makes
+    ProviderDashboardStatsView's revenue figures immune to a provider
+    later editing (or deleting) their service price list — see
+    price_at_booking / currency_at_booking on ProviderAppointment.
+    No-ops if the appointment has no service attached.
+    """
+    service = appointment.service
+    if service is not None:
+        appointment.price_at_booking = service.price
+        appointment.currency_at_booking = service.currency
+        appointment.save(update_fields=["price_at_booking", "currency_at_booking"])
 
 
 def _notify(recipient_identity, notification_type, title, message="", link="", appointment=None, for_provider=False):
@@ -342,6 +364,7 @@ class PatientAppointmentView(APIView):
                     status=status.HTTP_409_CONFLICT,
                 )
             appointment = serializer.save(provider=provider)
+            _snapshot_price(appointment)
 
         patient_identity = find_identity_by_email(appointment.patient_email)
         if patient_identity:
@@ -473,8 +496,12 @@ class PatientAppointmentView(APIView):
 
 
 class ProviderAppointmentView(APIView):
+    pagination_class = AppointmentPagination
+
     def get(self, request, identity_id):
         filter_type = request.query_params.get("filter", "upcoming")
+        start_param = request.query_params.get("start")
+        end_param = request.query_params.get("end")
         now = timezone.now()
 
         try:
@@ -482,23 +509,39 @@ class ProviderAppointmentView(APIView):
         except HealthcareProvider.DoesNotExist:
             return Response({"error": "Provider not found"}, status=status.HTTP_404_NOT_FOUND)
 
+        # FIX: was missing provider__identity, causing an N+1 -- every row
+        # serialized calls appointment.provider.identity.* for
+        # provider_first_name/provider_last_name/provider_id (see
+        # ProviderAppointmentSerializer), which is 2 extra queries per row
+        # without this. patient_identity needs no join: it's a plain FK
+        # field on the serializer, rendered as just the id.
         qs = ProviderAppointment.objects.filter(
             provider=provider
-        ).select_related("service")
+        ).select_related("service", "provider__identity")
 
         if filter_type == "today":
             qs = qs.filter(start_time__date=now.date()).order_by("start_time")
         elif filter_type == "past":
             qs = qs.filter(end_time__lt=now).order_by("-start_time")
         elif filter_type == "all":
-            qs = qs.order_by("start_time")
+            qs = qs.order_by("-start_time")
         else:
             qs = qs.filter(start_time__gte=now).exclude(
                 status__in=["cancelled", "no-show"]
             ).order_by("start_time")
 
-        serializer = ProviderAppointmentSerializer(qs, many=True)
-        return Response(serializer.data)
+        # NEW: optional date-window bounds, used by the Schedule calendar
+        # (filter=all) so it isn't forced to pull a provider's entire
+        # booking history just to render a ~67-day calendar view.
+        if start_param:
+            qs = qs.filter(end_time__gte=start_param)
+        if end_param:
+            qs = qs.filter(start_time__lte=end_param)
+
+        paginator = self.pagination_class()
+        page = paginator.paginate_queryset(qs, request)
+        serializer = ProviderAppointmentSerializer(page, many=True)
+        return paginator.get_paginated_response(serializer.data)
 
     def post(self, request, identity_id):
         try:
@@ -548,6 +591,8 @@ class ProviderAppointmentView(APIView):
                         status=status.HTTP_409_CONFLICT,
                     )
                 appointment = serializer.save(provider=provider)
+
+        _snapshot_price(appointment)
 
         patient_identity = find_identity_by_email(appointment.patient_email)
         if patient_identity:
@@ -810,12 +855,17 @@ class ProviderDashboardStatsView(APIView):
             start_time__gte=now,
         ).count()
 
+        # NOTE: sums price_at_booking (a snapshot taken at booking time via
+        # _snapshot_price), NOT the live Service.price — so editing or
+        # deleting a service later no longer changes past months' reported
+        # revenue. See price_at_booking / currency_at_booking on
+        # ProviderAppointment.
         revenue_mtd_agg = ProviderAppointment.objects.filter(
             provider=provider,
             status="completed",
             start_time__date__gte=month_start,
-            service__price__isnull=False,
-        ).aggregate(total=Sum("service__price"))
+            price_at_booking__isnull=False,
+        ).aggregate(total=Sum("price_at_booking"))
         revenue_mtd = revenue_mtd_agg["total"] or 0
 
         # New vs returning patients this month. A patient is "new" if the
@@ -891,7 +941,7 @@ class ProviderDashboardStatsView(APIView):
         virtual_count = type_count_map.get("virtual", 0)
         physical_count = type_count_map.get("physical", 0)
 
-        # Revenue by service this month — same completed + priced-service
+        # Revenue by service this month — same completed + priced-snapshot
         # filter as revenue_mtd above, just grouped instead of summed flat,
         # so revenue_by_service always sums back to revenue_mtd.
         revenue_by_service_qs = (
@@ -899,10 +949,10 @@ class ProviderDashboardStatsView(APIView):
                 provider=provider,
                 status="completed",
                 start_time__date__gte=month_start,
-                service__price__isnull=False,
+                price_at_booking__isnull=False,
             )
             .values("service__name")
-            .annotate(total=Sum("service__price"))
+            .annotate(total=Sum("price_at_booking"))
             .order_by("-total")
         )
         revenue_by_service = [
@@ -942,3 +992,330 @@ class ProviderDashboardStatsView(APIView):
             "physical_count": physical_count,
             "revenue_by_service": revenue_by_service,
         })
+
+# Add these two view classes to appointments/views.py (same file as
+# ProviderAppointmentView, AppointmentCaptureView, etc.), and register the
+# URLs alongside your other provider/appointments/* routes:
+#
+#   path("provider/<uuid:identity_id>/appointments/incomplete-notes",
+#        ProviderIncompleteNotesView.as_view()),
+#   path("provider/<uuid:identity_id>/appointments/with-messages",
+#        ProviderMessagedAppointmentsView.as_view()),
+#
+# Both reuse HealthcareProvider / ProviderAppointment / AppointmentCapture,
+# already imported at the top of this file.
+
+from django.db.models import Q
+
+
+class ProviderIncompleteNotesView(APIView):
+    """
+    Appointments that have concluded -- either explicitly marked
+    "completed", or past their end_time while still sitting in
+    scheduled/confirmed/in-progress (i.e. never resolved) -- but have no
+    AppointmentCapture saved against them at all. Deliberately excludes
+    appointments still in the future: there's nothing "overdue" about
+    notes for a visit that hasn't happened yet, and excludes
+    cancelled/no-show/rescheduled, since those were never going to
+    produce clinical notes in the first place.
+    """
+    def get(self, request, identity_id):
+        try:
+            provider = HealthcareProvider.objects.get(identity__id=identity_id)
+        except HealthcareProvider.DoesNotExist:
+            return Response({"error": "Provider not found"}, status=status.HTTP_404_NOT_FOUND)
+
+        now = timezone.now()
+        qs = (
+            ProviderAppointment.objects.filter(provider=provider)
+            .filter(
+                Q(status="completed")
+                | Q(end_time__lt=now, status__in=["scheduled", "confirmed", "in-progress"])
+            )
+            .exclude(id__in=AppointmentCapture.objects.values("appointment_id"))
+            .order_by("start_time")[:20]
+        )
+
+        data = [
+            {
+                "id": str(a.id),
+                "patient_name": f"{a.patient_first_name} {a.patient_last_name}".strip(),
+                "appointment_date": a.start_time.isoformat(),
+            }
+            for a in qs
+        ]
+        return Response(data)
+
+
+class ProviderMessagedAppointmentsView(APIView):
+    """
+    Upcoming appointments (end_time still in the future, not
+    cancelled/no-show/completed) that carry a non-empty booking message
+    -- the optional "message" field captured at booking time. An item
+    naturally drops off this list once the appointment concludes; no
+    read/unread tracking needed.
+    """
+    def get(self, request, identity_id):
+        try:
+            provider = HealthcareProvider.objects.get(identity__id=identity_id)
+        except HealthcareProvider.DoesNotExist:
+            return Response({"error": "Provider not found"}, status=status.HTTP_404_NOT_FOUND)
+
+        now = timezone.now()
+        qs = (
+            ProviderAppointment.objects.filter(provider=provider, end_time__gte=now)
+            .exclude(status__in=["cancelled", "no-show", "completed"])
+            .exclude(message="")
+            .order_by("start_time")[:20]
+        )
+
+        data = [
+            {
+                "id": str(a.id),
+                "patient_name": f"{a.patient_first_name} {a.patient_last_name}".strip(),
+                "appointment_date": a.start_time.isoformat(),
+                "message": a.message,
+            }
+            for a in qs
+        ]
+        return Response(data)
+
+# Add to appointments/views.py, alongside ProviderIncompleteNotesView /
+# ProviderMessagedAppointmentsView. Needs one extra import at the top:
+#   from django.db.models.functions import TruncMonth
+#   from dateutil.relativedelta import relativedelta   # already a Django dep via django-dateutil? if not, use timedelta math below instead
+
+
+
+
+class ProviderMonthlyTrendView(APIView):
+    """
+    Last N months (default 6) of two independent breakdowns, grouped by
+    calendar month of start_time:
+
+      - revenue: completed appointments' price_at_booking summed, vs
+        "lost" revenue -- the price_at_booking that would have been
+        earned from appointments that ended up cancelled or no-show.
+        Both sums rely on price_at_booking surviving status changes,
+        which it does (nothing in ProviderAppointment.save() or any
+        view clears it on cancellation).
+      - appointment_count: split by appointment_type (virtual/physical),
+        counted regardless of status -- this describes booking behavior,
+        not outcome.
+
+    Response shape:
+      [
+        {
+          "month": "2026-02",
+          "completed_revenue": 50000.0,
+          "lost_revenue": 8000.0,
+          "virtual_count": 44,
+          "physical_count": 14
+        },
+        ...
+      ]
+    """
+    def get(self, request, identity_id):
+        try:
+            provider = HealthcareProvider.objects.get(identity__id=identity_id)
+        except HealthcareProvider.DoesNotExist:
+            return Response({"error": "Provider not found"}, status=status.HTTP_404_NOT_FOUND)
+
+        try:
+            months_back = int(request.query_params.get("months", 6))
+        except ValueError:
+            months_back = 6
+        months_back = max(1, min(months_back, 24))
+
+        now = timezone.now()
+        # First day of the month, months_back-1 months ago, so "6" means
+        # "this month plus the 5 before it" -- matches the weekly_data
+        # pattern elsewhere in this file (inclusive of today's period).
+        current_month_start = now.replace(day=1, hour=0, minute=0, second=0, microsecond=0)
+        year = current_month_start.year
+        month = current_month_start.month - (months_back - 1)
+        while month <= 0:
+            month += 12
+            year -= 1
+        range_start = current_month_start.replace(year=year, month=month)
+
+        qs = ProviderAppointment.objects.filter(
+            provider=provider,
+            start_time__gte=range_start,
+        ).annotate(month=TruncMonth("start_time"))
+
+        revenue_rows = (
+            qs.filter(price_at_booking__isnull=False)
+            .values("month")
+            .annotate(
+                completed_revenue=Sum(
+                    "price_at_booking", filter=MonthlyQ(status="completed")
+                ),
+                lost_revenue=Sum(
+                    "price_at_booking",
+                    filter=MonthlyQ(status__in=["cancelled", "no-show"]),
+                ),
+            )
+        )
+        revenue_map = {
+            row["month"].strftime("%Y-%m"): {
+                "completed_revenue": float(row["completed_revenue"] or 0),
+                "lost_revenue": float(row["lost_revenue"] or 0),
+            }
+            for row in revenue_rows
+        }
+
+        type_rows = (
+            qs.values("month")
+            .annotate(
+                virtual_count=Count("id", filter=MonthlyQ(appointment_type="virtual")),
+                physical_count=Count("id", filter=MonthlyQ(appointment_type="physical")),
+            )
+        )
+        type_map = {
+            row["month"].strftime("%Y-%m"): {
+                "virtual_count": row["virtual_count"],
+                "physical_count": row["physical_count"],
+            }
+            for row in type_rows
+        }
+
+        # Build a complete month sequence so months with zero activity
+        # still appear as 0s, keeping the chart's x-axis continuous
+        # rather than skipping gaps.
+        result = []
+        cursor_year, cursor_month = range_start.year, range_start.month
+        for _ in range(months_back):
+            key = f"{cursor_year:04d}-{cursor_month:02d}"
+            rev = revenue_map.get(key, {"completed_revenue": 0.0, "lost_revenue": 0.0})
+            typ = type_map.get(key, {"virtual_count": 0, "physical_count": 0})
+            result.append({
+                "month": key,
+                **rev,
+                **typ,
+            })
+            cursor_month += 1
+            if cursor_month > 12:
+                cursor_month = 1
+                cursor_year += 1
+
+        return Response(result)
+
+# Add these imports near your other django.db.models.functions import (if
+# you don't already have TruncDate from the monthly-trend work):
+#   from datetime import timedelta, date as date_cls
+#   from calendar import monthrange
+#   from django.db.models.functions import TruncDate
+# Q should already be imported from the pending-actions views step.
+
+
+
+
+class ProviderAppointmentTrendView(APIView):
+    """
+    Day-by-day revenue and appointment-type breakdown, filtered by a
+    date range. Powers the dashboard's revenue bar chart and
+    appointment-type line chart (replaces the old static WeeklyChart,
+    which only ever showed a fixed last-7-days window with no filters).
+
+    Query params:
+      range   -- one of "last_7_days", "this_month" (default),
+                 "last_30_days", "month"
+      month   -- required when range="month", format "YYYY-MM"
+
+    Response: list of
+      {
+        "date": "2026-07-01",
+        "completed_revenue": 4200.0,
+        "lost_revenue": 0.0,
+        "virtual_count": 3,
+        "physical_count": 1
+      }
+    ordered oldest to newest, one entry per calendar day in range --
+    days with zero activity still appear, zeroed, so the chart's x-axis
+    stays continuous rather than skipping gaps.
+    """
+    def get(self, request, identity_id):
+        try:
+            provider = HealthcareProvider.objects.get(identity__id=identity_id)
+        except HealthcareProvider.DoesNotExist:
+            return Response({"error": "Provider not found"}, status=status.HTTP_404_NOT_FOUND)
+
+        range_param = request.query_params.get("range", "this_month")
+        today = timezone.localdate()
+
+        if range_param == "last_7_days":
+            start_date = today - timedelta(days=6)
+            end_date = today
+        elif range_param == "last_30_days":
+            start_date = today - timedelta(days=29)
+            end_date = today
+        elif range_param == "month":
+            month_param = request.query_params.get("month")
+            try:
+                year_str, month_str = month_param.split("-")
+                year, month = int(year_str), int(month_str)
+                start_date = date_cls(year, month, 1)
+            except (AttributeError, ValueError):
+                return Response(
+                    {"error": "month is required and must be in YYYY-MM format when range=month"},
+                    status=status.HTTP_400_BAD_REQUEST,
+                )
+            last_day = monthrange(year, month)[1]
+            month_end = date_cls(year, month, last_day)
+            # Don't show future days of a month that hasn't finished yet
+            end_date = min(month_end, today)
+        else:  # this_month (default)
+            start_date = today.replace(day=1)
+            end_date = today
+
+        if start_date > end_date:
+            return Response({"error": "Invalid date range"}, status=status.HTTP_400_BAD_REQUEST)
+
+        qs = ProviderAppointment.objects.filter(
+            provider=provider,
+            start_time__date__gte=start_date,
+            start_time__date__lte=end_date,
+        ).annotate(day=TruncDate("start_time"))
+
+        revenue_rows = (
+            qs.filter(price_at_booking__isnull=False)
+            .values("day")
+            .annotate(
+                completed_revenue=Sum("price_at_booking", filter=Q(status="completed")),
+                lost_revenue=Sum("price_at_booking", filter=Q(status__in=["cancelled", "no-show"])),
+            )
+        )
+        revenue_map = {
+            row["day"].isoformat(): {
+                "completed_revenue": float(row["completed_revenue"] or 0),
+                "lost_revenue": float(row["lost_revenue"] or 0),
+            }
+            for row in revenue_rows
+        }
+
+        type_rows = (
+            qs.values("day")
+            .annotate(
+                virtual_count=Count("id", filter=Q(appointment_type="virtual")),
+                physical_count=Count("id", filter=Q(appointment_type="physical")),
+            )
+        )
+        type_map = {
+            row["day"].isoformat(): {
+                "virtual_count": row["virtual_count"],
+                "physical_count": row["physical_count"],
+            }
+            for row in type_rows
+        }
+
+        result = []
+        cursor = start_date
+        while cursor <= end_date:
+            key = cursor.isoformat()
+            rev = revenue_map.get(key, {"completed_revenue": 0.0, "lost_revenue": 0.0})
+            typ = type_map.get(key, {"virtual_count": 0, "physical_count": 0})
+            result.append({"date": key, **rev, **typ})
+            cursor += timedelta(days=1)
+
+        return Response(result)

@@ -13,7 +13,19 @@ from .pin_permissions import RecordsUnlockRequired, ProviderPatientRelationshipR
 
 
 class PatientRecordSummaryView(APIView):
+    permission_classes = [IsAuthenticated]
+
     def get(self, request, patient_identity_id):
+        # FIX: previously had no permission_classes at all -- any caller,
+        # authenticated or not, could pull any patient's provider/record
+        # summary list just by knowing their patient_identity_id. Now
+        # requires auth and that the caller IS that patient.
+        if str(request.user.id) != str(patient_identity_id):
+            return Response(
+                {"error": "You do not have permission to view these records"},
+                status=status.HTTP_403_FORBIDDEN,
+            )
+
         try:
             patient_identity = Identity.objects.get(id=patient_identity_id)
         except Identity.DoesNotExist:
@@ -42,14 +54,14 @@ class PatientTimelineView(APIView):
     Patient-facing clinical timeline across AppointmentCapture,
     Prescription, and ProviderAppointment.
 
-    Gated by RecordsUnlockRequired — this is only for a patient viewing
+    Gated by RecordsUnlockRequired -- this is only for a patient viewing
     their OWN records. Providers must use ProviderPatientTimelineView
     below instead, which is gated by an actual care relationship rather
     than a PIN.
 
     Query params:
-      type     — filter by record type: "consultation" or "prescription"
-      provider — filter consultations to a specific provider (identity_id).
+      type     -- filter by record type: "consultation" or "prescription"
+      provider -- filter consultations to a specific provider (identity_id).
     """
     permission_classes = [IsAuthenticated, RecordsUnlockRequired]
 
@@ -166,16 +178,19 @@ class PatientTimelineView(APIView):
 class ProviderPatientTimelineView(APIView):
     """
     Provider-facing view of records THIS SPECIFIC PROVIDER created for a
-    patient — backs "Your records for this patient" in the provider's
+    patient -- backs "Your records for this patient" in the provider's
     AppointmentDetailPage, which explicitly requires no patient consent.
 
     Gated by ProviderPatientRelationshipRequired (imported from
     pin_permissions above), which checks an existing appointment
     relationship using provider_id/patient_identity_id taken directly
-    from the URL — matching how every other provider view in this
-    codebase identifies the requester, since the provider frontend does
-    not attach an Authorization header and IsAuthenticated would
-    therefore reject every legitimate request.
+    from the URL.
+
+    FIX: apps/provider (provider.veridoctor.com) attaches a Bearer token
+    via maybeAuthoriseProvider() on every non-public request.
+    ProviderPatientRelationshipRequired now verifies request.user against
+    provider_id in addition to its existing appointment-relationship
+    check -- see pin_permissions.py.
     """
     permission_classes = [ProviderPatientRelationshipRequired]
 
@@ -272,6 +287,16 @@ class ProviderPatientTimelineView(APIView):
 
 
 class ProviderPatientSummaryView(APIView):
+    """
+    FIX: previously no permission_classes -- any caller could pull PHI
+    (DOB, blood type, allergies, insurances, other providers' record
+    categories) for any appointment_id. apps/provider (provider.veridoctor.com)
+    attaches a Bearer token via maybeAuthoriseProvider() on every request,
+    so request.user is reliably populated -- now requires the caller to BE
+    the provider on this appointment.
+    """
+    permission_classes = [IsAuthenticated]
+
     def get(self, request, appointment_id):
         from appointments.models import ProviderAppointment
         from provider.models import Prescription
@@ -282,6 +307,12 @@ class ProviderPatientSummaryView(APIView):
             ).get(id=appointment_id)
         except ProviderAppointment.DoesNotExist:
             return Response({"error": "Appointment not found"}, status=status.HTTP_404_NOT_FOUND)
+
+        if str(request.user.id) != str(appointment.provider.identity_id):
+            return Response(
+                {"error": "You are not the provider on this appointment"},
+                status=status.HTTP_403_FORBIDDEN,
+            )
 
         patient_identity = appointment.patient_identity
         if not patient_identity:
@@ -385,6 +416,17 @@ class ProviderPatientSummaryView(APIView):
 
 
 class RecordAccessRequestView(APIView):
+    """
+    FIX: previously no permission_classes, and provider_identity_id was
+    taken directly from the request body with no check that the caller
+    IS that provider -- anyone could create access-grant requests
+    impersonating any provider. apps/provider attaches a Bearer token on
+    every request, so this now requires the caller to BE the
+    provider_identity_id claimed in the body, and to actually be the
+    provider on the named appointment.
+    """
+    permission_classes = [IsAuthenticated]
+
     def post(self, request):
         from appointments.models import ProviderAppointment
 
@@ -398,11 +440,23 @@ class RecordAccessRequestView(APIView):
                 status=status.HTTP_400_BAD_REQUEST,
             )
 
+        if str(request.user.id) != str(provider_identity_id):
+            return Response(
+                {"error": "provider_identity_id must match the authenticated provider"},
+                status=status.HTTP_403_FORBIDDEN,
+            )
+
         try:
             appointment = ProviderAppointment.objects.get(id=appointment_id)
             provider = HealthcareProvider.objects.get(identity__id=provider_identity_id)
         except (ProviderAppointment.DoesNotExist, HealthcareProvider.DoesNotExist):
             return Response({"error": "Appointment or provider not found"}, status=status.HTTP_404_NOT_FOUND)
+
+        if appointment.provider_id != provider.id:
+            return Response(
+                {"error": "This provider is not the requester on this appointment"},
+                status=status.HTTP_403_FORBIDDEN,
+            )
 
         patient_identity = appointment.patient_identity
         if not patient_identity:
@@ -448,11 +502,17 @@ class PatientAccessRequestsView(APIView):
     GET /records/patient/<patient_identity_id>/access-requests
         ?status=pending&page=1&page_size=20&search=doctor18
 
-    FIX: this view used to return every RecordAccessGrant for the patient
-    in one unpaginated list -- fine at a handful of requests, but at scale
-    (hundreds/thousands of historical grants across many providers) that's
-    an ever-growing payload with no way to filter down to just what needs
-    action. Added:
+    FIX (security): this view had no permission_classes at all -- any
+    caller, authenticated or not, could read any patient's full access-
+    request history (which providers asked for access, to what category,
+    status) just by knowing patient_identity_id. Now requires auth and
+    that the caller IS that patient.
+
+    FIX (pagination): this view used to return every RecordAccessGrant for
+    the patient in one unpaginated list -- fine at a handful of requests,
+    but at scale (hundreds/thousands of historical grants across many
+    providers) that's an ever-growing payload with no way to filter down
+    to just what needs action. Added:
       - status filtering ("pending" | "approved" | "denied"; omitted/
         "all" returns everything, same as before)
       - free-text search against the requesting provider's name/speciality
@@ -462,10 +522,16 @@ class PatientAccessRequestsView(APIView):
         frontend code already consuming this endpoint's plain list --
         only now it's wrapped in {count, next, previous, results}.
     """
-
+    permission_classes = [IsAuthenticated]
     pagination_class = AccessRequestPagination
 
     def get(self, request, patient_identity_id):
+        if str(request.user.id) != str(patient_identity_id):
+            return Response(
+                {"error": "You do not have permission to view these access requests"},
+                status=status.HTTP_403_FORBIDDEN,
+            )
+
         try:
             patient_identity = Identity.objects.get(id=patient_identity_id)
         except Identity.DoesNotExist:
@@ -522,6 +588,8 @@ class RecordAccessGrantDetailView(APIView):
     Patient approves or denies an access request.
     PATCH /records/access-grants/<grant_id>
     """
+    permission_classes = [IsAuthenticated]
+
     def patch(self, request, grant_id):
         new_status = request.data.get("status")
         if new_status not in ("approved", "denied"):
@@ -534,6 +602,15 @@ class RecordAccessGrantDetailView(APIView):
             grant = RecordAccessGrant.objects.get(id=grant_id)
         except RecordAccessGrant.DoesNotExist:
             return Response({"error": "Grant not found"}, status=status.HTTP_404_NOT_FOUND)
+
+        # FIX: previously anyone (authenticated or not) could approve/deny
+        # any patient's access grant just by knowing the grant_id. Now we
+        # require the caller to BE the patient this grant belongs to.
+        if str(request.user.id) != str(grant.patient_identity_id):
+            return Response(
+                {"error": "You do not have permission to respond to this access request"},
+                status=status.HTTP_403_FORBIDDEN,
+            )
 
         grant.status = new_status
         grant.responded_at = timezone.now()
@@ -554,6 +631,8 @@ class PatientSensitivityView(APIView):
     PATCH /records/sensitivity/<summary_id>
     Body: { "sensitivity": "always_visible" | "ask_first" | "never" }
     """
+    permission_classes = [IsAuthenticated]
+
     def patch(self, request, summary_id):
         VALID = {"always_visible", "ask_first", "never"}
         new_sensitivity = request.data.get("sensitivity")
@@ -568,6 +647,18 @@ class PatientSensitivityView(APIView):
             summary = PatientProviderRecordSummary.objects.get(id=summary_id)
         except PatientProviderRecordSummary.DoesNotExist:
             return Response({"error": "Record summary not found"}, status=status.HTTP_404_NOT_FOUND)
+
+        # FIX: previously anyone (authenticated or not) could flip any
+        # patient's sensitivity setting just by knowing the summary_id --
+        # including quietly setting it to "always_visible" to disable
+        # another patient's consent gate before pulling their records
+        # elsewhere. Now requires the caller to BE the patient who owns
+        # this summary.
+        if str(request.user.id) != str(summary.patient_identity_id):
+            return Response(
+                {"error": "You do not have permission to modify this setting"},
+                status=status.HTTP_403_FORBIDDEN,
+            )
 
         summary.sensitivity = new_sensitivity
         summary.save(update_fields=["sensitivity", "updated_at"])
@@ -586,28 +677,39 @@ class ProviderGrantedRecordsView(APIView):
     This is the missing piece: ProviderPatientSummaryView only ever
     returns grant metadata (status/count), and ProviderPatientTimelineView
     only returns records THIS provider created. Neither can show another
-    provider's records even after the patient approves — this view closes
+    provider's records even after the patient approves -- this view closes
     that gap.
 
     GET /records/provider/<provider_id>/appointment/<appointment_id>/granted-records/<category>
 
     No permission_classes here deliberately: ProviderPatientRelationshipRequired
     expects a `patient_identity_id` URL kwarg (it was written for
-    ProviderPatientTimelineView's URL shape), which this route doesn't have —
+    ProviderPatientTimelineView's URL shape), which this route doesn't have --
     it identifies the patient via the appointment instead. Using that
     permission class here would make view.kwargs.get("patient_identity_id")
     return None, failing has_permission() unconditionally for every request.
-    Instead, get() below does its own — stricter — check: it confirms the
+    Instead, get() below does its own -- stricter -- check: it confirms the
     requesting provider matches appointment.provider, that an APPROVED
     RecordAccessGrant exists for this exact appointment/category, and that
-    it hasn't expired. That's already more precise than a general
-    "some non-cancelled appointment exists with this patient" check would
-    have been, so no separate permission class is needed.
+    it hasn't expired.
+
+    FIX: previously all checks below compared URL-supplied IDs against
+    each other for internal consistency, but never verified request.user
+    against provider_id. apps/provider attaches a Bearer token on every
+    request, so this now requires the caller to BE the provider_id in
+    the URL before anything else runs.
     """
+    permission_classes = [IsAuthenticated]
 
     def get(self, request, provider_id, appointment_id, category):
         from appointments.models import ProviderAppointment
         from provider.models import Prescription
+
+        if str(request.user.id) != str(provider_id):
+            return Response(
+                {"error": "You are not authorised to view records as this provider"},
+                status=status.HTTP_403_FORBIDDEN,
+            )
 
         try:
             appointment = ProviderAppointment.objects.select_related(
@@ -746,9 +848,15 @@ class PatientVitalsView(APIView):
     Deliberately NOT gated by RecordsUnlockRequired (unlike
     PatientTimelineView) -- a quick vitals glance on the dashboard landing
     page shouldn't require entering the records PIN first; that gate stays
-    reserved for full clinical notes/timeline. No permission_classes here
-    matches the same precedent already set by PatientRecordSummaryView
-    above, for similarly low-sensitivity, identity-scoped data.
+    reserved for full clinical notes/timeline.
+
+    FIX: previously had no permission_classes at all, meaning this was a
+    fully unauthenticated IDOR -- vitals for any patient_identity_id were
+    readable by anyone. "No PIN required" was never meant to mean "no
+    auth/ownership check required" -- it only meant skip the extra PIN
+    gate on top of normal auth. Now requires IsAuthenticated and that the
+    caller IS the patient being requested, same as every other
+    patient-facing view in this file.
 
     Matches vitals by FIELD LABEL CONTENT (case-insensitive substring), not
     fixed field ID -- field IDs are randomly generated per form and never
@@ -757,6 +865,7 @@ class PatientVitalsView(APIView):
     across this codebase's forms, per the "Vital Signs" section confirmed
     in provider form-builder.
     """
+    permission_classes = [IsAuthenticated]
 
     VITAL_SPECS = [
         {"key": "blood_pressure", "label": "Blood Pressure", "keywords": ["blood pressure"]},
@@ -767,6 +876,12 @@ class PatientVitalsView(APIView):
     ]
 
     def get(self, request, patient_identity_id):
+        if str(request.user.id) != str(patient_identity_id):
+            return Response(
+                {"error": "You do not have permission to view these vitals"},
+                status=status.HTTP_403_FORBIDDEN,
+            )
+
         try:
             patient_identity = Identity.objects.get(id=patient_identity_id)
         except Identity.DoesNotExist:

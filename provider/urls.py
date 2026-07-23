@@ -1,6 +1,10 @@
 from django.urls import path
 from .views import (
     ProviderProfileView,
+    ProviderLocationListView,
+    ProviderLocationDetailView,
+    ProviderLocationDocumentUploadView,
+    ProviderLocationDocumentReviewListView,
     ServiceView,
     ServiceDetailView,
     FormView,
@@ -33,6 +37,11 @@ urlpatterns = [
     # Profile
     path("<str:identity_id>/profile", ProviderProfileView.as_view()),
     path("<str:identity_id>/public-profile", ProviderPublicProfileView.as_view()),
+    # Practice locations
+    path("<str:identity_id>/locations", ProviderLocationListView.as_view()),
+    path("<str:identity_id>/locations/<str:location_id>", ProviderLocationDetailView.as_view()),
+    path("<str:identity_id>/locations/<str:location_id>/document", ProviderLocationDocumentUploadView.as_view()),
+    path("<str:identity_id>/locations/<str:location_id>/document-reviews", ProviderLocationDocumentReviewListView.as_view()),
     # Photo & document uploads
     path("<str:identity_id>/photo", ProviderPhotoUploadView.as_view()),
     path("<str:identity_id>/document", ProviderDocumentUploadView.as_view()),

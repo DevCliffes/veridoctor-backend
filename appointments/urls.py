@@ -4,21 +4,20 @@ from .views import (
     ProviderAppointmentView,
     ProviderAppointmentDetailView,
     AppointmentCaptureView,
+    ProviderIncompleteNotesView,
+    ProviderMessagedAppointmentsView,
+    ProviderMonthlyTrendView,
+    ProviderAppointmentTrendView,
 )
 
 urlpatterns = [
-    # Patient-facing — list + create
     path("", PatientAppointmentView.as_view()),
-
-    # Patient-facing — update (cancel / reschedule)  ← THIS WAS MISSING
     path("<uuid:appointment_id>/", PatientAppointmentView.as_view()),
-
-    # Provider-facing — list + create
     path("provider/<uuid:identity_id>/appointments/", ProviderAppointmentView.as_view()),
-
-    # Provider-facing — detail, update, delete
     path("provider/<uuid:identity_id>/appointments/<uuid:appointment_id>/", ProviderAppointmentDetailView.as_view()),
-
-    # Appointment captures — list + create
     path("provider/<uuid:identity_id>/appointments/<uuid:appointment_id>/captures/", AppointmentCaptureView.as_view()),
+    path("provider/<uuid:identity_id>/appointments/incomplete-notes/", ProviderIncompleteNotesView.as_view()),
+    path("provider/<uuid:identity_id>/appointments/with-messages/", ProviderMessagedAppointmentsView.as_view()),
+    path("provider/<uuid:identity_id>/appointments/monthly-trend/", ProviderMonthlyTrendView.as_view()),
+    path("provider/<uuid:identity_id>/appointments/trend/", ProviderAppointmentTrendView.as_view()),
 ]
