@@ -175,6 +175,20 @@ DATABASES = {
     }
 }
 
+# CACHE — backs rate limiting / lockout on OTP endpoints (SendOTPView,
+# VerifyOTPView). Using Postgres-backed DatabaseCache rather than the
+# default LocMemCache: LocMemCache is per-process memory, so if this
+# service ever runs more than one worker process, a "5 per hour" limit
+# would silently mean "5 per hour per worker" instead of a real global
+# limit. DatabaseCache uses the same Postgres instance already
+# configured above, so no new infra (e.g. Redis) is needed.
+CACHES = {
+    "default": {
+        "BACKEND": "django.core.cache.backends.db.DatabaseCache",
+        "LOCATION": "vd_cache_table",
+    }
+}
+
 # SECRETS
 JWT_SECRET = os.getenv("JWT_SECRET")
 

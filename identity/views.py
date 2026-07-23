@@ -1,16 +1,17 @@
 from rest_framework.views import APIView
 from rest_framework.response import Response
 from rest_framework import status
+from rest_framework.permissions import IsAuthenticated
 from rest_framework.exceptions import AuthenticationFailed
 from django.shortcuts import get_object_or_404
 from django.conf import settings
+from django.core.cache import cache
 
 from utils.code_generators import generate_code
 from django.core.mail import send_mail
 from django.utils import timezone
 from django.contrib.auth import authenticate, login
 from datetime import timedelta
-from rest_framework.authentication import TokenAuthentication
 
 from .serializers import IdentitySerializer, HealthcareProviderAccountSerializer
 from .models import (
@@ -58,13 +59,122 @@ class StatusView(APIView):
 FROM_EMAIL = settings.EMAIL_HOST_USER
 
 
+def _identity_authorised(request, identity_id):
+    """
+    Shared ownership check used by views that can legitimately be called
+    in TWO different auth states:
+
+      1. Fully authenticated -- request.user is a real, logged-in
+         Identity (normal JWTAuthentication via Authorization header),
+         checked against identity_id as usual.
+
+      2. Pre-session -- called from the login handoff page
+         (apps/web /auth/accounts/{id}) BEFORE any access token exists.
+         At this point all the caller has is the one-time auth_code
+         LoginView just issued, passed as ?auth_tkn=. We validate it
+         against the AuthCode row exactly like TokenView does, but
+         WITHOUT deleting it -- TokenView is still the thing that
+         consumes it later, once the user picks an account and the
+         chosen app (provider/health-portal) does its own real token
+         exchange via /identity/authorise. Consuming it here would
+         break that later exchange.
+
+    Returns True/False rather than raising, so callers can return their
+    own 403 response shape.
+    """
+    user = getattr(request, "user", None)
+    if user is not None and getattr(user, "is_authenticated", False):
+        if str(user.id) == str(identity_id):
+            return True
+
+    auth_tkn = request.query_params.get("auth_tkn")
+    if not auth_tkn:
+        return False
+
+    try:
+        temp_auth_code = AuthCode.objects.get(identity__id=identity_id)
+    except AuthCode.DoesNotExist:
+        return False
+
+    if temp_auth_code.code != auth_tkn:
+        return False
+
+    try:
+        jwt.decode(auth_tkn, settings.JWT_SECRET, algorithms=["HS256"])
+    except jwt.ExpiredSignatureError:
+        return False
+    except jwt.InvalidTokenError:
+        return False
+
+    return True
+
+
+def _cache_incr(key, timeout):
+    """
+    Increment a counter that may not exist yet, in a race-safe-enough way
+    for a single Postgres-backed cache table (DatabaseCache does the
+    increment as an UPDATE, so concurrent requests don't just clobber
+    each other's writes the way plain get/set would).
+
+    cache.add() sets the key ONLY if absent, seeding it at 1 with the
+    given timeout. If it already existed, cache.incr() bumps it without
+    touching its existing TTL -- exactly what a fixed rolling window
+    needs (the window started when the key was first seeded, not on
+    every subsequent request).
+    """
+    added = cache.add(key, 1, timeout)
+    if added:
+        return 1
+    try:
+        return cache.incr(key)
+    except ValueError:
+        # Key expired between add() and incr() (razor-thin race) -- reset it.
+        cache.set(key, 1, timeout)
+        return 1
+
+
 class RegisterView(APIView):
-    authentication_classes = [TokenAuthentication]
+    """
+    GET/PATCH/DELETE act on an existing identity and require the caller
+    to BE that identity. POST is signup and must stay public.
+
+    FIX: this class previously declared
+    `authentication_classes = [TokenAuthentication]` -- DRF's built-in
+    TokenAuthentication, a completely different mechanism from
+    identity.authentication.JWTAuthentication, which every other view in
+    this project relies on via the global DEFAULT_AUTHENTICATION_CLASSES
+    setting and which nothing in this codebase actually issues tokens
+    for (no Token.objects.create anywhere, no Authorization: Token
+    <key> usage). Declaring it here silently overrode the global JWT
+    auth for this view only, meaning request.user would likely never
+    populate correctly even with IsAuthenticated added. Removed so this
+    view uses the same JWT auth as everywhere else.
+
+    CONFIRMED SAFE TO DEPLOY: verified no Token.objects.create anywhere
+    in the codebase, rest_framework.authtoken isn't an installed app,
+    and a comment in identity/authentication.py already documents that
+    this project issues its own JWTs instead of DRF's token model.
+    """
     queryset = Identity.objects.all()
+
+    def get_permissions(self):
+        if self.request.method == "POST":
+            return []
+        return [IsAuthenticated()]
 
     def get(self, request, identity_id):
         if not identity_id:
             return Response({"error": "bad request"}, status=status.HTTP_400_BAD_REQUEST)
+
+        # FIX: previously no permission check at all -- any caller could
+        # read any identity's full profile (name, email, phone, gender,
+        # insurances) just by knowing identity_id.
+        if str(request.user.id) != str(identity_id):
+            return Response(
+                {"error": "You do not have permission to view this profile"},
+                status=status.HTTP_403_FORBIDDEN,
+            )
+
         identity = get_object_or_404(Identity, id=identity_id)
         serializer = IdentitySerializer(identity)
         data = serializer.data
@@ -158,6 +268,15 @@ class RegisterView(APIView):
     def patch(self, request, identity_id):
         if not request.data or not identity_id:
             return Response({"error": "bad request"}, status=status.HTTP_400_BAD_REQUEST)
+
+        # FIX: previously anyone could update any identity's profile
+        # fields (including insurances) just by knowing identity_id.
+        if str(request.user.id) != str(identity_id):
+            return Response(
+                {"error": "You do not have permission to modify this profile"},
+                status=status.HTTP_403_FORBIDDEN,
+            )
+
         identity = get_object_or_404(Identity, id=identity_id)
 
         insurances = request.data.get("insurances", None)
@@ -189,12 +308,23 @@ class RegisterView(APIView):
     def delete(self, request, identity_id):
         if not identity_id:
             return Response({"error": "bad request"}, status=status.HTTP_400_BAD_REQUEST)
+
+        # FIX: previously anyone could deactivate any account just by
+        # knowing identity_id -- an unauthenticated way to lock any user
+        # out of their own account.
+        if str(request.user.id) != str(identity_id):
+            return Response(
+                {"error": "You do not have permission to deactivate this account"},
+                status=status.HTTP_403_FORBIDDEN,
+            )
+
         identity = get_object_or_404(Identity, id=identity_id)
         identity.is_active = False
         identity.email_verified = False
         identity.deleted_at = timezone.now()
         identity.save()
         return Response({}, status=status.HTTP_204_NO_CONTENT)
+
 
 class LoginView(APIView):
     # FIX: explicitly public. Previously this view had no authentication_classes
@@ -306,7 +436,36 @@ class RefreshTokenView(APIView):
         access_token = generateaccessToken(identity=identity_id)
         return Response({"a_token": access_token}, status=status.HTTP_200_OK)
 
+
 class SendOTPView(APIView):
+    """
+    FIX (security): previously took an arbitrary `user` (identity id) from
+    the request body with no ownership check AND no rate limiting --
+    anyone who had or guessed an identity_id could spam that person's
+    inbox indefinitely. Can't require IsAuthenticated the normal way since
+    this runs pre-session (part of the login/verify flow), so this is
+    fixed with rate limiting instead, keyed by identity_id:
+
+      - COOLDOWN: one send per identity per 60s, so a user double-tapping
+        "resend" doesn't invalidate their own in-flight code, and so a
+        single spammer can't fire requests back-to-back.
+      - HOURLY CAP: max 5 sends per identity per rolling hour, so even
+        respecting the cooldown, a spammer can't grind out dozens of
+        emails to the same inbox in a short window.
+
+    Ownership (anyone can still trigger a send for an identity_id they
+    don't own) is NOT fixed here -- that's inherent to this being a
+    pre-session endpoint reachable before any session exists (the
+    "forgot my code, resend it" flow can't require being logged in as
+    the account it's resending a code for). Rate limiting is the
+    correct control for this specific view; it cannot become fully
+    ownership-gated without breaking the flow it exists for.
+    """
+
+    SEND_COOLDOWN_SECONDS = 60
+    SEND_MAX_PER_WINDOW = 5
+    SEND_WINDOW_SECONDS = 3600
+
     def post(self, request):
         if not request.data:
             return Response({"error": "bad request"}, status=status.HTTP_400_BAD_REQUEST)
@@ -314,6 +473,25 @@ class SendOTPView(APIView):
         if not identity:
             return Response({"error": "user required"}, status=status.HTTP_400_BAD_REQUEST)
         identity = get_object_or_404(Identity, id=identity)
+        identity_id = str(identity.id)
+
+        cooldown_key = f"otp:send:cooldown:{identity_id}"
+        if cache.get(cooldown_key):
+            return Response(
+                {"error": "please wait before requesting another code"},
+                status=status.HTTP_429_TOO_MANY_REQUESTS,
+            )
+
+        count_key = f"otp:send:count:{identity_id}"
+        count = _cache_incr(count_key, self.SEND_WINDOW_SECONDS)
+        if count > self.SEND_MAX_PER_WINDOW:
+            return Response(
+                {"error": "too many code requests, please try again later"},
+                status=status.HTTP_429_TOO_MANY_REQUESTS,
+            )
+
+        cache.set(cooldown_key, True, self.SEND_COOLDOWN_SECONDS)
+
         otp = generate_code(length=6, digits_only=True)
         try:
             existing_otp = Otp.objects.get(identity_ref=identity)
@@ -336,21 +514,69 @@ class SendOTPView(APIView):
 
 
 class VerifyOTPView(APIView):
+    """
+    FIX (security): previously took `user` (identity id) from the request
+    body with no ownership check and no attempt limiting -- a 6-digit OTP
+    is only 1,000,000 possibilities, brute-forceable by an automated
+    script hitting this endpoint repeatedly with the same identity_id.
+
+    Fixed with a cache-based lockout keyed by identity_id:
+      - After MAX_ATTEMPTS wrong guesses within ATTEMPT_WINDOW_SECONDS,
+        the identity is locked out for LOCKOUT_SECONDS -- verification
+        attempts return 429 regardless of the code supplied, without
+        even checking it against the DB.
+      - A successful verification clears both the attempt counter and
+        any lockout for that identity.
+
+    Ownership is not (and structurally cannot be) fixed here for the same
+    reason as SendOTPView -- this runs before a session exists.
+    """
+
+    MAX_ATTEMPTS = 5
+    ATTEMPT_WINDOW_SECONDS = 600  # 10 min -- matches the OTP's own expiry
+    LOCKOUT_SECONDS = 900  # 15 min
+
     def post(self, request):
         otp = request.data.get("otp")
         identity = request.data.get("user")
         if not request.data or not otp or not identity:
             return Response({"error": "bad request, please fill in all required fields"}, status=status.HTTP_400_BAD_REQUEST)
+
+        identity_id = str(identity)
+        lock_key = f"otp:verify:lock:{identity_id}"
+        if cache.get(lock_key):
+            return Response(
+                {"error": "too many failed attempts, please try again later"},
+                status=status.HTTP_429_TOO_MANY_REQUESTS,
+            )
+
         otp_instance = get_object_or_404(Otp, identity_ref=identity)
+
         if not otp_instance.code == otp or otp_instance.is_used:
+            self._register_failed_attempt(identity_id)
             return Response({"error": "invalid OTP code"}, status=status.HTTP_400_BAD_REQUEST)
+
         now = timezone.now()
         if now > (otp_instance.created_at + timedelta(minutes=10)):
             return Response({"error": "OTP expired, request another OTP"}, status=status.HTTP_400_BAD_REQUEST)
+
         otp_instance.is_used = True
         Identity.objects.filter(id=identity).update(email_verified=True)
         otp_instance.save()
+
+        # Success -- clear any accumulated attempt count/lockout so a
+        # later legitimate re-verification (e.g. a second OTP flow for
+        # this identity down the line) isn't penalised by past failures.
+        cache.delete(f"otp:verify:attempts:{identity_id}")
+        cache.delete(lock_key)
+
         return Response({"detail": "OTP verified"}, status=status.HTTP_200_OK)
+
+    def _register_failed_attempt(self, identity_id):
+        attempts_key = f"otp:verify:attempts:{identity_id}"
+        attempts = _cache_incr(attempts_key, self.ATTEMPT_WINDOW_SECONDS)
+        if attempts >= self.MAX_ATTEMPTS:
+            cache.set(f"otp:verify:lock:{identity_id}", True, self.LOCKOUT_SECONDS)
 
 
 class ResetPasswordView(APIView):
@@ -389,7 +615,29 @@ class confirmResetPasswordView(APIView):
 
 
 class IdentityAccountsView(APIView):
+    """
+    Two legitimate callers, two different auth states:
+
+      1. The pre-session login handoff page (apps/web /auth/accounts/{id})
+         -- calls this BEFORE any access token exists, using only the
+         one-time auth_code LoginView just issued (?auth_tkn=). This is
+         the endpoint's ORIGINAL and still-primary use case.
+      2. Any already-logged-in app calling this later with a real JWT.
+
+    Uses _identity_authorised(), which accepts EITHER a matching
+    authenticated request.user OR a valid, unexpired auth_code for this
+    identity via ?auth_tkn=. The auth_code is validated, not consumed --
+    TokenView is still what deletes it, whenever the chosen app does its
+    own real token exchange later.
+    """
+
     def get(self, request, identity_id):
+        if not _identity_authorised(request, identity_id):
+            return Response(
+                {"error": "You do not have permission to view these accounts"},
+                status=status.HTTP_403_FORBIDDEN,
+            )
+
         identity = get_object_or_404(Identity, id=identity_id)
         patient_account = patientAccount.objects.filter(identity__id=identity_id).first()
         facility_manager_account = FacilityManagerAccount.objects.filter(identity__id=identity_id).first()
@@ -430,6 +678,12 @@ class IdentityAccountsView(APIView):
         )
 
     def post(self, request, identity_id):
+        if not _identity_authorised(request, identity_id):
+            return Response(
+                {"error": "You do not have permission to modify this identity"},
+                status=status.HTTP_403_FORBIDDEN,
+            )
+
         account_type = request.data.get("account_type")
         if not request.data or not account_type:
             return Response({"error": "bad request"}, status=status.HTTP_400_BAD_REQUEST)
@@ -505,6 +759,13 @@ class IdentityAccountsView(APIView):
 
 
 class ActivateAccountView(APIView):
+    # TODO: this method body is currently just `pass` after the guard
+    # clause -- falls through and returns None, which DRF will likely
+    # error on. Needs a real implementation; flagging as a separate bug
+    # from auth. Added IsAuthenticated as a baseline so this isn't wide
+    # open once someone does implement it.
+    permission_classes = [IsAuthenticated]
+
     def post(self, request, account_type, init_model_id):
         if not request.data or account_type not in ACCOUNT_TYPES:
             return Response({"error": "bad request"}, status=status.HTTP_400_BAD_REQUEST)
@@ -512,6 +773,11 @@ class ActivateAccountView(APIView):
 
 
 class DeactivateAccountView(APIView):
+    # TODO: currently a no-op -- always returns success without touching
+    # the DB. Add an ownership check here once this actually deactivates
+    # something. Added IsAuthenticated as a baseline in the meantime.
+    permission_classes = [IsAuthenticated]
+
     def post(self, request, identity_id, account_type):
         if account_type not in ACCOUNT_TYPES:
             return Response({"error": "invalid account type"}, status=status.HTTP_400_BAD_REQUEST)
@@ -519,7 +785,20 @@ class DeactivateAccountView(APIView):
 
 
 class DeactivateIdentityView(APIView):
+    """
+    FIX: previously no permission_classes -- anyone could deactivate any
+    account just by knowing identity_id. Now requires the caller to BE
+    that identity.
+    """
+    permission_classes = [IsAuthenticated]
+
     def post(self, request, identity_id):
+        if str(request.user.id) != str(identity_id):
+            return Response(
+                {"error": "You do not have permission to deactivate this account"},
+                status=status.HTTP_403_FORBIDDEN,
+            )
+
         identity = get_object_or_404(Identity, id=identity_id)
         identity.is_active = False
         identity.save()

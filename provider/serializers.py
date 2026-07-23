@@ -1,12 +1,14 @@
 from .models import (
     Service,
     HealthcareProvider,
+    ProviderLocation,
     Form,
     Prescription,
     PrescriptionDrug,
     ProviderSchedule,
     ProviderReview,
     ProviderDocumentReview,
+    ProviderLocationDocumentReview,
 )
 from rest_framework import serializers
 class ServiceSerializer(serializers.ModelSerializer):
@@ -102,10 +104,9 @@ class ProviderReviewCreateSerializer(serializers.ModelSerializer):
 
 
 class ProviderDocumentReviewSerializer(serializers.ModelSerializer):
-    """Read-only view of a provider's per-document review status, used by
-    ProviderDocumentReviewListView so providers can see exactly what was
-    rejected and why (category + free-text reason) and re-upload
-    accordingly."""
+    """Read-only view of a provider's per-document review status
+    (national ID, valid licence — the two personal/professional docs
+    that still live on HealthcareProvider itself)."""
 
     field_label = serializers.CharField(source="get_field_name_display", read_only=True)
     status_label = serializers.CharField(source="get_status_display", read_only=True)
@@ -126,4 +127,95 @@ class ProviderDocumentReviewSerializer(serializers.ModelSerializer):
             "rejection_reason",
             "reviewed_at",
         ]
+        read_only_fields = fields
+
+
+class ProviderLocationDocumentReviewSerializer(serializers.ModelSerializer):
+    """Per-field review status for a single ProviderLocation's facility
+    documents (clinic logo, business reg, operating licence, KRA PIN,
+    CR12) — same shape as ProviderDocumentReviewSerializer, scoped to a
+    location instead of the provider directly."""
+
+    field_label = serializers.CharField(source="get_field_name_display", read_only=True)
+    status_label = serializers.CharField(source="get_status_display", read_only=True)
+    rejection_category_label = serializers.CharField(
+        source="get_rejection_category_display", read_only=True
+    )
+
+    class Meta:
+        model = ProviderLocationDocumentReview
+        fields = [
+            "field_name",
+            "field_label",
+            "status",
+            "status_label",
+            "document_url",
+            "rejection_category",
+            "rejection_category_label",
+            "rejection_reason",
+            "reviewed_at",
+        ]
+        read_only_fields = fields
+
+
+class ProviderLocationSerializer(serializers.ModelSerializer):
+    """Full read/write representation of one practice location, for the
+    provider-facing "My Locations" UI. Includes nested document review
+    statuses so the frontend can render a DocumentReviewBadge per field
+    without an extra request per location.
+
+    NOT for patient-facing use — this exposes business_reg_number,
+    kra_pin, and raw document review detail. See
+    ProviderLocationPublicSerializer for what patients should see."""
+
+    document_reviews = ProviderLocationDocumentReviewSerializer(many=True, read_only=True)
+    missing_fields = serializers.SerializerMethodField()
+
+    class Meta:
+        model = ProviderLocation
+        fields = [
+            "id",
+            "name",
+            "address",
+            "county",
+            "country",
+            "clinic_logo_url",
+            "business_reg_number",
+            "business_reg_image",
+            "operating_licence",
+            "operating_licence_image",
+            "kra_pin",
+            "kra_pin_image",
+            "cr12_image",
+            "is_primary",
+            "data_complete",
+            "is_fully_approved_cache",
+            "document_reviews",
+            "missing_fields",
+            "created_at",
+            "updated_at",
+        ]
+        read_only_fields = [
+            "id",
+            "data_complete",
+            "is_fully_approved_cache",
+            "document_reviews",
+            "missing_fields",
+            "created_at",
+            "updated_at",
+        ]
+
+    def get_missing_fields(self, obj):
+        return obj.missing_fields()
+
+
+class ProviderLocationPublicSerializer(serializers.ModelSerializer):
+    """What a patient is allowed to see about a provider's location:
+    just enough to pick a facility when booking. Deliberately excludes
+    business_reg_number, kra_pin, document URLs, and review status —
+    none of that is patient-facing information."""
+
+    class Meta:
+        model = ProviderLocation
+        fields = ["id", "name", "address", "county", "country", "is_primary"]
         read_only_fields = fields

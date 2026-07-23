@@ -66,7 +66,6 @@ class ProviderAppointment(BaseAppointment, BaseModel):
     )
     message = models.TextField(blank=True)
     meet_id = models.CharField(max_length=32, unique=True, blank=True)
-
     # Real-world timestamps captured when status actually transitions to
     # in-progress / completed — distinct from start_time/end_time, which
     # are just the scheduled slot and never move once booked (aside from
@@ -75,6 +74,20 @@ class ProviderAppointment(BaseAppointment, BaseModel):
     # than how long the slot was booked for.
     actual_start_time = models.DateTimeField(null=True, blank=True)
     actual_end_time = models.DateTimeField(null=True, blank=True)
+
+    # Snapshot of the service's price/currency at the moment this
+    # appointment was created — deliberately NOT a live reference to
+    # Service.price. Revenue reporting (ProviderDashboardStatsView) must
+    # reflect what was actually charged at booking time, not whatever the
+    # provider's price list says today. Without this, editing a service's
+    # price retroactively changes past months' reported revenue, and
+    # deleting a service (service is SET_NULL) makes past revenue vanish
+    # entirely. Null on historical rows created before this field existed
+    # until backfilled.
+    price_at_booking = models.DecimalField(
+        max_digits=10, decimal_places=2, null=True, blank=True
+    )
+    currency_at_booking = models.CharField(max_length=10, null=True, blank=True)
 
     class Meta:
         ordering = ["start_time"]
