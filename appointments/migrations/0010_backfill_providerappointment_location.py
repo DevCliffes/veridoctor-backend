@@ -5,11 +5,12 @@ def backfill_appointment_locations(apps, schema_editor):
     """
     Mirrors the logic used in provider/migrations/0017 for
     ProviderSchedule: any existing *physical* appointment with no
-    location gets the provider's primary (or oldest approved) location,
-    where that's unambiguous. Virtual appointments are left untouched --
-    they're location-less by design. Appointments for a provider with no
-    approved locations at all (or where "primary" can't be determined)
-    are left null; nothing here invents data that isn't there.
+    location gets the provider's primary (or oldest fully-approved)
+    location, where that's unambiguous. Virtual appointments are left
+    untouched -- they're location-less by design. Appointments for a
+    provider with no fully-approved locations at all (or where "primary"
+    can't be determined) are left null; nothing here invents data that
+    isn't there.
     """
     ProviderAppointment = apps.get_model("appointments", "ProviderAppointment")
     ProviderLocation = apps.get_model("provider", "ProviderLocation")
@@ -24,7 +25,7 @@ def backfill_appointment_locations(apps, schema_editor):
 
     for provider_id in providers_needing_backfill:
         locations_qs = ProviderLocation.objects.filter(
-            provider_id=provider_id, approved=True
+            provider_id=provider_id, is_fully_approved_cache=True
         ).order_by("created_at")
 
         location = (
