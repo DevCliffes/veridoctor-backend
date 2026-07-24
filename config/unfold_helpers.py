@@ -11,8 +11,6 @@ def environment_callback(request):
     if os.getenv("DJANGO_DEBUG_MODE", "True") == "True":
         return ["Development", "warning"]
     return ["Production", "danger"]
-
-
 def dashboard_callback(request, context):
     """
     Injects custom data into the admin index page context.
@@ -22,9 +20,7 @@ def dashboard_callback(request, context):
     from appointments.models import ProviderAppointment
     from identity.models import patientAccount, HealthcareProviderAccount
     from provider.models import HealthcareProvider
-
     incomplete_count = HealthcareProvider.objects.filter(profile_complete=False).count()
-
     context.update(
         {
             "kpi": [
@@ -53,3 +49,32 @@ def dashboard_callback(request, context):
         }
     )
     return context
+
+
+def pending_document_reviews_badge(request):
+    """
+    Live count badge for the "Pending review" nav item under
+    Document Reviews (personal/professional documents -- national ID,
+    valid licence -- see provider/admin.py -> ProviderDocumentReviewAdmin).
+    """
+    from provider.models import ProviderDocumentReview
+    count = ProviderDocumentReview.objects.filter(
+        status=ProviderDocumentReview.STATUS_PENDING
+    ).count()
+    return count or None
+
+
+def pending_location_document_reviews_badge(request):
+    """
+    Live count badge for the "Pending review" nav item under
+    Practice Locations (facility documents -- clinic logo, business reg,
+    operating licence, KRA PIN, CR12 -- see provider/admin.py ->
+    ProviderLocationDocumentReviewAdmin). Mirrors
+    pending_document_reviews_badge above, scoped to
+    ProviderLocationDocumentReview instead of ProviderDocumentReview.
+    """
+    from provider.models import ProviderLocationDocumentReview
+    count = ProviderLocationDocumentReview.objects.filter(
+        status=ProviderLocationDocumentReview.STATUS_PENDING
+    ).count()
+    return count or None
