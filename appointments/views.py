@@ -4,6 +4,7 @@ from django.db.models import Avg, F, ExpressionWrapper, DurationField, Count, Su
 from datetime import timedelta
 from identity.models import Identity
 from provider.models import HealthcareProvider, Prescription, PrescriptionDrug
+from provider.serializers import ProviderLocationPublicSerializer
 from rest_framework import status
 from rest_framework.response import Response
 from rest_framework.views import APIView
@@ -287,9 +288,13 @@ class PatientAppointmentView(APIView):
             )
 
         now = timezone.now()
+        # NEW: select_related("location") -- this view builds its response
+        # dict by hand instead of going through ProviderAppointmentSerializer,
+        # so accessing appt.location below for location/location_detail
+        # would otherwise fire one extra query per row.
         qs = ProviderAppointment.objects.filter(
             patient_email__iexact=patient_email
-        ).select_related("provider", "provider__identity", "service")
+        ).select_related("provider", "provider__identity", "service", "location")
 
         if filter_type == "today":
             qs = qs.filter(start_time__date=now.date()).order_by("start_time")
@@ -316,6 +321,15 @@ class PatientAppointmentView(APIView):
                 "patient_phone_number": appt.patient_phone_number,
                 "patient_identity": str(appt.patient_identity_id) if appt.patient_identity_id else None,
                 "appointment_type": appt.appointment_type,
+                # NEW: mirrors what ProviderAppointmentSerializer exposes
+                # elsewhere (location pk + nested detail), so the patient
+                # "My Appointments" list can show which facility a physical
+                # visit is at without a second request per appointment.
+                "location": str(appt.location_id) if appt.location_id else None,
+                "location_detail": (
+                    ProviderLocationPublicSerializer(appt.location).data
+                    if appt.location else None
+                ),
                 "service": str(appt.service_id) if appt.service_id else None,
                 "service_name": appt.service.name if appt.service else None,
                 "message": appt.message,
@@ -344,7 +358,14 @@ class PatientAppointmentView(APIView):
                 status=status.HTTP_400_BAD_REQUEST,
             )
 
-        serializer = ProviderAppointmentSerializer(data=request.data)
+        # NEW: context={"provider": provider} -- ProviderAppointmentSerializer
+        # .validate_location() needs this on create, since there's no
+        # self.instance yet to read a provider off of. Patients booking
+        # a physical slot for the wrong provider's location now get a
+        # proper 400 instead of silently attaching a mismatched location.
+        serializer = ProviderAppointmentSerializer(
+            data=request.data, context={"provider": provider}
+        )
         if not serializer.is_valid():
             return Response(serializer.errors, status=status.HTTP_400_BAD_REQUEST)
 
@@ -409,15 +430,22 @@ class PatientAppointmentView(APIView):
 
     def patch(self, request, appointment_id):
         try:
+            # NEW: added "location" -- appointment gets re-serialized via
+            # ProviderAppointmentSerializer(updated) below, whose
+            # location_detail nested field would otherwise fire an extra
+            # query.
             appointment = ProviderAppointment.objects.select_related(
-                "provider", "provider__identity", "patient_identity"
+                "provider", "provider__identity", "patient_identity", "location"
             ).get(id=appointment_id)
         except ProviderAppointment.DoesNotExist:
             return Response({"error": "Appointment not found"}, status=status.HTTP_404_NOT_FOUND)
 
         old_status = appointment.status
         serializer = ProviderAppointmentSerializer(
-            appointment, data=request.data, partial=True
+            appointment,
+            data=request.data,
+            partial=True,
+            context={"provider": appointment.provider},
         )
         if not serializer.is_valid():
             return Response(serializer.errors, status=status.HTTP_400_BAD_REQUEST)
@@ -515,9 +543,14 @@ class ProviderAppointmentView(APIView):
         # ProviderAppointmentSerializer), which is 2 extra queries per row
         # without this. patient_identity needs no join: it's a plain FK
         # field on the serializer, rendered as just the id.
+        # NEW: added "location" -- ProviderAppointmentSerializer.location_detail
+        # is a nested ProviderLocationPublicSerializer(source="location"),
+        # which would otherwise re-fetch the location per row (this view
+        # is the main Schedule calendar feed, so it's the highest-traffic
+        # place this would have bitten).
         qs = ProviderAppointment.objects.filter(
             provider=provider
-        ).select_related("service", "provider__identity")
+        ).select_related("service", "provider__identity", "location")
 
         if filter_type == "today":
             qs = qs.filter(start_time__date=now.date()).order_by("start_time")
@@ -568,7 +601,13 @@ class ProviderAppointmentView(APIView):
         # unchanged from before.
         is_instant = str(data.pop("is_instant", False)).lower() in ("true", "1")
 
-        serializer = ProviderAppointmentSerializer(data=data)
+        # NEW: context={"provider": provider} -- same reasoning as
+        # PatientAppointmentView.post. A provider logging a walk-in/express
+        # physical appointment at a location that isn't actually one of
+        # their own now gets a 400 instead of a silently mismatched record.
+        serializer = ProviderAppointmentSerializer(
+            data=data, context={"provider": provider}
+        )
         if not serializer.is_valid():
             return Response(serializer.errors, status=status.HTTP_400_BAD_REQUEST)
 
@@ -635,8 +674,14 @@ class ProviderAppointmentView(APIView):
 class ProviderAppointmentDetailView(APIView):
     def get(self, request, identity_id, appointment_id):
         try:
+            # FIX: added "provider__identity" -- ProviderAppointmentSerializer's
+            # provider_first_name/provider_last_name/provider_id all read
+            # appointment.provider.identity.*, which this view fired as 2
+            # extra queries per request without this join.
+            # NEW: added "location" for the same reason -- location_detail
+            # is nested via ProviderLocationPublicSerializer(source="location").
             appointment = ProviderAppointment.objects.select_related(
-                "service", "patient_identity"
+                "service", "patient_identity", "provider__identity", "location"
             ).get(id=appointment_id)
         except ProviderAppointment.DoesNotExist:
             return Response({"error": "Not found"}, status=status.HTTP_404_NOT_FOUND)
@@ -645,15 +690,20 @@ class ProviderAppointmentDetailView(APIView):
 
     def patch(self, request, identity_id, appointment_id):
         try:
+            # NEW: added "location" -- same reasoning as the other patch
+            # endpoints above.
             appointment = ProviderAppointment.objects.select_related(
-                "provider", "provider__identity", "patient_identity"
+                "provider", "provider__identity", "patient_identity", "location"
             ).get(id=appointment_id)
         except ProviderAppointment.DoesNotExist:
             return Response({"error": "Not found"}, status=status.HTTP_404_NOT_FOUND)
 
         old_status = appointment.status
         serializer = ProviderAppointmentSerializer(
-            appointment, data=request.data, partial=True
+            appointment,
+            data=request.data,
+            partial=True,
+            context={"provider": appointment.provider},
         )
         if not serializer.is_valid():
             return Response(serializer.errors, status=status.HTTP_400_BAD_REQUEST)
@@ -993,17 +1043,6 @@ class ProviderDashboardStatsView(APIView):
             "revenue_by_service": revenue_by_service,
         })
 
-# Add these two view classes to appointments/views.py (same file as
-# ProviderAppointmentView, AppointmentCaptureView, etc.), and register the
-# URLs alongside your other provider/appointments/* routes:
-#
-#   path("provider/<uuid:identity_id>/appointments/incomplete-notes",
-#        ProviderIncompleteNotesView.as_view()),
-#   path("provider/<uuid:identity_id>/appointments/with-messages",
-#        ProviderMessagedAppointmentsView.as_view()),
-#
-# Both reuse HealthcareProvider / ProviderAppointment / AppointmentCapture,
-# already imported at the top of this file.
 
 from django.db.models import Q
 
@@ -1079,13 +1118,6 @@ class ProviderMessagedAppointmentsView(APIView):
             for a in qs
         ]
         return Response(data)
-
-# Add to appointments/views.py, alongside ProviderIncompleteNotesView /
-# ProviderMessagedAppointmentsView. Needs one extra import at the top:
-#   from django.db.models.functions import TruncMonth
-#   from dateutil.relativedelta import relativedelta   # already a Django dep via django-dateutil? if not, use timedelta math below instead
-
-
 
 
 class ProviderMonthlyTrendView(APIView):
@@ -1200,15 +1232,6 @@ class ProviderMonthlyTrendView(APIView):
                 cursor_year += 1
 
         return Response(result)
-
-# Add these imports near your other django.db.models.functions import (if
-# you don't already have TruncDate from the monthly-trend work):
-#   from datetime import timedelta, date as date_cls
-#   from calendar import monthrange
-#   from django.db.models.functions import TruncDate
-# Q should already be imported from the pending-actions views step.
-
-
 
 
 class ProviderAppointmentTrendView(APIView):
