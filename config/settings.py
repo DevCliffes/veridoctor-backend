@@ -408,7 +408,9 @@ UNFOLD = {
                 # New section: lets an admin jump straight to the document
                 # review queue (see provider/admin.py ->
                 # ProviderDocumentReviewAdmin) without hunting through
-                # "Healthcare providers" first.
+                # "Healthcare providers" first. Covers the two
+                # personal/professional documents that live directly on
+                # HealthcareProvider (National ID, valid licence).
                 "title": _("Document Reviews"),
                 "separator": True,
                 "items": [
@@ -439,6 +441,56 @@ UNFOLD = {
                         "link": lambda request: (
                             reverse_lazy(
                                 "admin:provider_providerdocumentreview_changelist"
+                            )
+                            + "?status__exact=rejected"
+                        ),
+                    },
+                ],
+            },
+            {
+                # Facility-document review queue for ProviderLocation --
+                # the location-scoped counterpart to "Document Reviews"
+                # above. Covers clinic logo, business registration,
+                # operating licence, KRA PIN, and CR12 for each of a
+                # provider's practice locations. See provider/admin.py
+                # -> ProviderLocationAdmin / ProviderLocationDocumentReviewAdmin.
+                "title": _("Practice Locations"),
+                "separator": True,
+                "items": [
+                    {
+                        "title": _("All locations"),
+                        "icon": "apartment",
+                        "link": reverse_lazy(
+                            "admin:provider_providerlocation_changelist"
+                        ),
+                    },
+                    {
+                        "title": _("All document reviews"),
+                        "icon": "fact_check",
+                        "link": reverse_lazy(
+                            "admin:provider_providerlocationdocumentreview_changelist"
+                        ),
+                    },
+                    {
+                        "title": _("Pending review"),
+                        "icon": "hourglass_empty",
+                        "link": lambda request: (
+                            reverse_lazy(
+                                "admin:provider_providerlocationdocumentreview_changelist"
+                            )
+                            + "?status__exact=pending"
+                        ),
+                        # Shows a live count badge next to this nav item.
+                        # Requires pending_location_document_reviews_badge()
+                        # to be defined in config/unfold_helpers.py.
+                        "badge": "config.unfold_helpers.pending_location_document_reviews_badge",
+                    },
+                    {
+                        "title": _("Rejected"),
+                        "icon": "cancel",
+                        "link": lambda request: (
+                            reverse_lazy(
+                                "admin:provider_providerlocationdocumentreview_changelist"
                             )
                             + "?status__exact=rejected"
                         ),
