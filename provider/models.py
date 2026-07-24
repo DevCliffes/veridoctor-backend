@@ -379,10 +379,27 @@ class ProviderSchedule(models.Model):
     )
     location_type = models.CharField(max_length=10, choices=LOCATION_CHOICES, default="virtual")
 
-    # NOTE: a `location` FK (to ProviderLocation) is planned for a later
-    # phase, once schedules need to be facility-aware ("Tue at Facility A,
-    # Thu at Facility B"). Deliberately not added yet -- kept out of this
-    # migration so it can be scoped and reviewed on its own.
+    # A schedule block is only tied to a specific ProviderLocation when it
+    # can involve seeing patients in person -- i.e. location_type is
+    # "physical" or "both". A purely "virtual" block has no facility
+    # attached (null), since the whole point of virtual care is that it
+    # isn't tied to a place. Enforced in the view layer (see
+    # ProviderScheduleView.post / ProviderScheduleDetailView.patch), not
+    # at the DB level, since the requirement depends on location_type,
+    # which a plain FK constraint can't express.
+    #
+    # on_delete=SET_NULL rather than CASCADE: if a location is deleted,
+    # existing schedule blocks that referenced it shouldn't vanish --
+    # they fall back to unscoped (null), same as a virtual block, rather
+    # than silently deleting a provider's whole recurring availability
+    # because they removed one facility.
+    location = models.ForeignKey(
+        ProviderLocation,
+        on_delete=models.SET_NULL,
+        null=True,
+        blank=True,
+        related_name="schedules",
+    )
 
     start_date = models.DateField()
     end_date = models.DateField()
