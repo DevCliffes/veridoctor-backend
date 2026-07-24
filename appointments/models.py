@@ -61,6 +61,20 @@ class ProviderAppointment(BaseAppointment, BaseModel):
                    "Identity at booking time. May be null for older "
                    "records until the backfill command links them.",
     )
+    # Which of the provider's facilities this appointment is/was at.
+    # Null for virtual appointments (location-less by design, same rule
+    # as ProviderSchedule) and for physical appointments booked before
+    # this field existed, until backfilled. SET_NULL rather than CASCADE
+    # for the same reason as ProviderSchedule.location: deleting a
+    # facility shouldn't delete appointment history tied to it -- the
+    # appointment just loses its location reference.
+    location = models.ForeignKey(
+        "provider.ProviderLocation",
+        on_delete=models.SET_NULL,
+        null=True,
+        blank=True,
+        related_name="appointments",
+    )
     appointment_type = models.CharField(
         max_length=20, choices=APPOINTMENT_TYPE_CHOICES, default="virtual"
     )
