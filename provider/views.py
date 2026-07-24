@@ -1,7 +1,7 @@
 import os
 from datetime import date, datetime, timedelta
 
-from django.db.models import Avg, Count
+from django.db.models import Avg, Count, Q
 from django.utils import timezone as dj_timezone
 
 from rest_framework import status
@@ -112,12 +112,13 @@ LOCATION_MISSING_FIELD_LABELS = {
 # source of truth; a separate booking-vs-booking check would be redundant
 # as long as this function has no gaps.
 #
-# NOTE: schedules are not yet location-aware (no `location` FK on
-# ProviderSchedule — see the model's docstring), so this overlap check
-# and ProviderAvailableSlotsView below are unchanged by the location
-# split. A provider with two facilities open at the same time still
-# can't double-book themselves, which is correct; splitting availability
-# per-facility is a separate, later phase.
+# NOTE: overlap detection is deliberately still GLOBAL across locations,
+# even though ProviderSchedule now has a `location` FK. A solo provider
+# physically cannot be in two places (or one place and a video call) at
+# the same time, so two schedule blocks pointing at *different* locations
+# still must not be allowed to overlap. Only availability *lookup*
+# (ProviderAvailableSlotsView) is location-scoped -- overlap prevention
+# is not, and shouldn't be.
 # ─────────────────────────────────────────────────────────────────────────
 
 # recurrence_days is stored using JS's Date.getDay() convention
@@ -1055,7 +1056,11 @@ class ProviderScheduleView(APIView):
         if resolved_end_date:
             data["end_date"] = resolved_end_date
 
-        serializer = ProviderScheduleSerializer(data=data)
+        # `context={"provider": provider}` lets ProviderScheduleSerializer.
+        # validate_location() confirm the submitted location actually
+        # belongs to this provider -- there's no instance to check against
+        # yet on create, so it has to be passed in explicitly.
+        serializer = ProviderScheduleSerializer(data=data, context={"provider": provider})
         if serializer.is_valid():
             new_spec = _spec_from_data(serializer.validated_data)
             conflict_response = _check_schedule_overlap(provider, new_spec)
@@ -1086,7 +1091,9 @@ class ProviderScheduleDetailView(APIView):
         if resolved_end_date:
             data["end_date"] = resolved_end_date
 
-        serializer = ProviderScheduleSerializer(schedule, data=data, partial=True)
+        serializer = ProviderScheduleSerializer(
+            schedule, data=data, partial=True, context={"provider": schedule.provider}
+        )
         if serializer.is_valid():
             merged = _spec_from_schedule(schedule)
             merged.update(serializer.validated_data)
@@ -1170,6 +1177,13 @@ class ProviderListView(APIView):
                 "clinic_name": primary_location.name if primary_location else "",
                 "county": primary_location.county if primary_location else "",
                 "locations_count": len(approved_locations),
+                # Full approved-location list -- lets BookPage render a
+                # facility picker per provider up front, instead of a
+                # separate request per card just to find out where an
+                # in-person appointment would actually happen.
+                "locations": ProviderLocationPublicSerializer(
+                    approved_locations, many=True
+                ).data,
                 "bio": p.bio or "",
                 "languages": p.languages or [],
                 "insurances_accepted": p.insurances_accepted or [],
@@ -1235,6 +1249,13 @@ class ProviderPublicProfileView(APIView):
 class ProviderAvailableSlotsView(APIView):
     def get(self, request, identity_id):
         query_date_str = request.query_params.get("date")
+        # Optional -- when omitted, both virtual and every physical/both
+        # block across all of the provider's locations are returned
+        # together, same as before this endpoint became location-aware.
+        # A patient's booking UI is expected to pass this once they've
+        # picked a facility for an in-person visit.
+        location_id = request.query_params.get("location_id")
+
         if not query_date_str:
             return Response({"error": "date param required (YYYY-MM-DD)"}, status=400)
         try:
@@ -1259,13 +1280,6 @@ class ProviderAvailableSlotsView(APIView):
         if _compute_onboarding_status(provider) != "approved":
             return Response([])
 
-        # NOTE: ProviderSchedule has no `location` FK yet (see the model
-        # docstring), so slots returned here aren't scoped to a specific
-        # facility even though a provider may have more than one now. A
-        # `location_id` query param and per-schedule location FK are the
-        # planned follow-up once schedules become facility-aware -- not
-        # added in this pass to keep that change reviewable on its own.
-
         python_dow = query_date.weekday()
         dow_abbr = ["Mon", "Tue", "Wed", "Thu", "Fri", "Sat", "Sun"][python_dow]
         query_date_str_iso = query_date.isoformat()
@@ -1274,7 +1288,18 @@ class ProviderAvailableSlotsView(APIView):
             provider=provider,
             start_date__lte=query_date,
             end_date__gte=query_date,
-        )
+        ).select_related("location", "service")
+
+        if location_id:
+            # A virtual block has no location and is always eligible
+            # regardless of which facility was picked for the in-person
+            # side of the search -- a patient choosing "Clinic B" should
+            # still see the provider's virtual slots alongside Clinic B's
+            # physical ones. Only physical/both blocks tied to a
+            # *different* location are excluded.
+            schedules = schedules.filter(
+                Q(location_id=location_id) | Q(location__isnull=True)
+            )
 
         matching = []
         for s in schedules:
@@ -1325,6 +1350,8 @@ class ProviderAvailableSlotsView(APIView):
                             "service_id": str(s.service.id) if s.service else None,
                             "service_name": s.service.name if s.service else None,
                             "location_type": s.location_type,
+                            "location_id": str(s.location_id) if s.location_id else None,
+                            "location_name": s.location.name if s.location else None,
                             "duration_minutes": duration,
                         })
                     seen.add(key)
